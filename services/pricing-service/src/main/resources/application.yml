@@ -1,0 +1,50 @@
+server:
+  port: 8083
+
+spring:
+  application:
+    name: pricing-service
+  profiles:
+    active: sqlite
+  datasource:
+    driver-class-name: org.sqlite.JDBC
+    url: jdbc:sqlite:./data/pricing.db
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: pricing-service
+      auto-offset-reset: latest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      enable-auto-commit: false
+    producer:
+      acks: all
+      enable-idempotence: true
+      retries: 3
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+mybatis:
+  mapper-locations: classpath:mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+
+pricing:
+  market-data-topic: market-data
+  quote-topic: customer-quote
+  default-bid-spread-bps: 5
+  default-ask-spread-bps: 5
+  spread-configs:
+    - symbol: AU2406
+      bidSpreadBps: 3
+      askSpreadBps: 3
+    - symbol: AG2406
+      bidSpreadBps: 5
+      askSpreadBps: 5
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+  instance:
+    prefer-ip-address: true

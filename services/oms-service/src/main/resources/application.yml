@@ -1,0 +1,37 @@
+server:
+  port: 8084
+
+spring:
+  application:
+    name: oms-service
+  profiles:
+    active: sqlite
+  datasource:
+    driver-class-name: org.sqlite.JDBC
+    url: jdbc:sqlite:./data/oms.db
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      acks: all
+      enable-idempotence: true
+      retries: 3
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+mybatis:
+  mapper-locations: classpath:mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+
+oms:
+  risk-service-url: http://risk-service
+  trade-topic: trade-event
+  pricing-service-url: http://pricing-service
+  market-data-service-url: http://market-data-service
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+  instance:
+    prefer-ip-address: true

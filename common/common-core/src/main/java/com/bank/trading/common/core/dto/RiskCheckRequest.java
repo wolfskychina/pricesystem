@@ -32,6 +32,14 @@ public class RiskCheckRequest implements Serializable {
     private BigDecimal qty;
     /** 委托价格（限价单有效），用于估算占用保证金 */
     private BigDecimal price;
+    /** 市场中间价，用于价格偏离度检查和市价单金额估算 */
+    private BigDecimal marketMidPrice;
+    /** 已用信用额度 */
+    private BigDecimal usedCredit;
+    /** 当日已用金额 */
+    private BigDecimal dailyUsedAmount;
+    /** 当前持仓数量 */
+    private BigDecimal currentPosition;
     /** 客户端订单 ID，用于风控日志关联与幂等 */
     private String clientOrderId;
     /** 分布式链路追踪 ID，串联风控调用链路 */

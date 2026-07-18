@@ -39,6 +39,10 @@
         <module>infra/eureka-server</module>
         <module>infra/config-server</module>
         <module>services/refdata-service</module>
+        <module>services/market-data-service</module>
+        <module>services/pricing-service</module>
+        <module>services/oms-service</module>
+        <module>services/risk-service</module>
         <module>sim/sim-exchange</module>
     </modules>
 
