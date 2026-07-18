@@ -14,6 +14,9 @@ eureka:
 
 sim-exchange:
   interval-ms: 1000
+  # 撮合延迟（毫秒）：模拟真实交易所从受理到撮合的处理延迟。
+  # 设为 0 表示立即撮合（用于测试）；生产模拟建议设为 50-200ms。
+  match-delay-ms: 100
   symbols:
     - code: "AU2406"
       name: "黄金2406"

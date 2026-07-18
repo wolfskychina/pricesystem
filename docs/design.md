@@ -167,13 +167,41 @@
 
 【参考来源：**几何布朗运动（GBM）模型**】— 金融数学中描述资产价格随时间波动的经典随机过程，是 Black-Scholes 期权定价模型的基础假设。真实市场中股票、期货等资产的价格走势大致符合对数正态分布，GBM 模型通过漂移率（μ）和波动率（σ）两个参数来刻画价格的长期趋势和短期波动幅度，生成的行情比简单随机游走更接近真实市场。
 
+【参考来源：**CTP / CME Globex FIX 协议**】— 真实期货交易所（国内 CTP、国际 CME Globex）的下单接口均采用**异步两阶段模型**：
+- **国内 CTP**：`ReqOrderInsert` 同步返回仅表示"请求已送达前置机"，随后通过 `OnRspOrderInsert`（受理确认）、`OnRtnOrder`（订单状态回报）、`OnRtnTrade`（成交通知）三个异步回调推送结果。
+- **国际 CME Globex（FIX 4.4）**：`NewOrderSingle (D)` 发送后，通过异步 `ExecutionReport (8)` 推送，Tag 150 (ExecType) 区分 New / Partial Fill / Filled / Cancelled / Rejected 等状态。
+- **通信通道**：做市商系统（EMS）与交易所之间通过 **TCP 长连接 + SDK 回调**（CTP）或 **FIX 会话回调**（Globex）通信，**不使用消息队列**。Kafka 仅用于做市商内部微服务之间的事件分发。
+
+本模拟系统据此实现：sim-exchange 与 execution-service 之间通过 **Webhook 回调**模拟 SDK/FIX 的异步推送语义，对齐真实交易所行为。
+
 - **独立进程** Spring Boot 应用
 - 从配置文件读取初始报价
 - 按几何布朗运动（GBM）生成连续随机波动行情，接近真实市场
 - WebSocket 广播行情
-- REST: `POST /exchange/orders` 接受对冲单，立即撮合成交
+- REST: `POST /exchange/orders` 接受对冲单，**同步仅返回订单受理（状态=NEW）或参数校验拒绝（REJECTED）**，不返回成交
+- REST: `GET /exchange/orders/{orderId}` 查询订单状态（受理后异步撮合，状态会变为 ACCEPTED → FILLED/PARTIALLY_FILLED/REJECTED）
+- REST: `POST /exchange/callbacks/register` 注册 Webhook 回调地址，撮合完成后异步推送订单状态变更与成交通知（模拟 CTP `OnRtnOrder` / `OnRtnTrade`）
 - REST: `GET /exchange/marketdata/{symbol}` 拉取最新价
 - 内存存储，重启丢失（本期模拟用）
+
+**异步两阶段撮合流程**：
+```
+1. EMS → sim-exchange: POST /exchange/orders（下单）
+2. sim-exchange: 参数校验 → 通过则入订单表(状态=NEW) → 同步返回订单对象
+3. sim-exchange: 异步撮合线程延迟 N ms 后撮合
+   - 更新订单状态为 ACCEPTED → FILLED/PARTIALLY_FILLED/REJECTED
+4. sim-exchange → EMS: POST {ems_webhook}/execution/callback/order（订单状态回报，模拟 OnRtnOrder）
+5. sim-exchange → EMS: POST {ems_webhook}/execution/callback/trade（成交通知，模拟 OnRtnTrade）
+```
+
+**与真实交易所的语义对齐**：
+| 真实交易所 | 模拟实现 |
+|---|---|
+| CTP `ReqOrderInsert` / FIX `NewOrderSingle` | `POST /exchange/orders`（同步受理） |
+| CTP `OnRtnOrder` 订单状态回报 | Webhook `POST /execution/callback/order` |
+| CTP `OnRtnTrade` 成交通知 | Webhook `POST /execution/callback/trade` |
+| TCP 长连接 + SDK 回调 | HTTP Webhook 回调 |
+| 做市商内部 Kafka 分发 | Kafka trade-event / hedge-fill-event（不变） |
 
 **行情波动模型**：几何布朗运动（Geometric Brownian Motion）
 ```
@@ -494,12 +522,13 @@ trading-system/
    4.2 Risk → RefData: 查合约参数
    4.3 Risk → Position: 查当前持仓
    4.4 Risk 返回通过/拒绝
-5. OMS: 风控通过 → 撮合成交（做市商即对手方）
+5. OMS: 风控通过 → 做市商以报价与客户立即成交（做市商即对手方，订单状态=FILLED）
 6. OMS 本地事务:
-   - 更新 orders 表状态
+   - 更新 orders 表状态为 FILLED
+   - 写入 trades 表（客户成交记录）
    - 写入 outbox 表
    - 写入 event_store 表
-7. OMS 返回客户: 订单已受理
+7. OMS 返回客户: 订单已成交（FILLED，含成交价与成交量）
 8. Outbox Relay: 轮询 outbox → 发送到 Kafka trade-event
 9. 并发消费者（幂等处理）:
    - Position: 更新客户头寸
@@ -507,7 +536,9 @@ trading-system/
    - Risk: 事后敞口检查
    - Execution: 生成对冲单
 10. Execution → Sim-Exchange: POST /exchange/orders (对冲下单)
-11. Execution → Kafka: 发布 hedge-fill-event
+    - sim-exchange 同步返回订单受理（NEW），不返回成交
+    - sim-exchange 异步撮合后通过 Webhook 回调推送成交
+11. Execution 收到 Webhook 成交通知 → Kafka: 发布 hedge-fill-event
 12. Position: 更新对冲头寸，计算净敞口
 13. Notify → 客户: WebSocket 推送成交回报
 ```

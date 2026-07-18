@@ -11,12 +11,15 @@ import java.util.List;
 /**
  * 订单 REST 接口。
  * <p>
- * 提供下单、查询订单状态、查询成交记录三类接口，是外部交易策略与模拟交易所交互的
- * 入口。下单后由 {@link MatchingEngine} 即时撮合：市价单按当前盘口对侧价全量成交，
- * 限价单在价格触及对侧价时成交，否则拒单。
+ * 提供下单、查询订单状态、查询成交记录三类接口，是外部交易策略与模拟交易所交互的入口。
  * <p>
- * 业务背景：模拟交易所作为做市商系统的"对手方"，所有订单均即时成交或即时拒绝，
- * 不维护订单簿挂单队列，这与真实连续竞价交易所不同，但足以满足策略回测与功能验证需求。
+ * <b>异步两阶段模型</b>（对齐真实期货交易所 CTP/Globex 语义）：
+ * <ul>
+ *   <li>{@link #submitOrder} 同步仅做参数校验并返回状态为 NEW 的订单对象（订单已受理，尚未撮合）。</li>
+ *   <li>撮合在异步线程中执行，完成后通过 Webhook 回调推送订单状态回报与成交通知
+ *       （模拟 CTP {@code OnRtnOrder} / {@code OnRtnTrade}）。</li>
+ *   <li>调用方可通过 {@link #getOrder} 轮询订单状态，或注册 Webhook 接收异步回调。</li>
+ * </ul>
  */
 @RestController
 @RequestMapping("/exchange/orders")
@@ -35,13 +38,20 @@ public class OrderController {
     }
 
     /**
-     * 提交订单接口。
+     * 提交订单接口（同步受理阶段）。
      * <p>
      * 业务逻辑：将请求体中的订单字段透传给撮合引擎，由撮合引擎生成订单 ID、
-     * 立即撮合并返回包含成交结果的订单对象。
+     * 入表（状态=NEW）并提交异步撮合任务。<b>同步返回的订单对象状态为 NEW，不包含成交结果</b>。
+     * <p>
+     * 成交结果通过以下两种方式获取：
+     * <ol>
+     *   <li>异步 Webhook 回调（需先调用 {@code POST /exchange/callbacks/register} 注册）</li>
+     *   <li>轮询 {@code GET /exchange/orders/{orderId}} 查询订单状态</li>
+     * </ol>
      *
      * @param request 订单请求体，包含客户单号、合约、方向、类型、数量、价格等
-     * @return 包装了订单对象（含成交信息）的统一响应
+     * @return 包装了订单对象（状态=NEW）的统一响应
+     * @throws IllegalArgumentException 参数校验失败（模拟 CTP 前置同步校验拒绝）
      */
     @PostMapping
     public Result<ExchangeOrder> submitOrder(@RequestBody OrderRequest request) {
