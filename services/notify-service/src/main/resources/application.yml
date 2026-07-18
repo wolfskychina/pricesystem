@@ -1,0 +1,29 @@
+server:
+  port: 8087
+
+spring:
+  application:
+    name: notify-service
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: notify-service
+      auto-offset-reset: latest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      enable-auto-commit: false
+
+notify:
+  trade-topic: trade-event
+  hedge-fill-topic: hedge-fill-event
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+  instance:
+    prefer-ip-address: true
+
+logging:
+  level:
+    com.bank.trading.notify: INFO

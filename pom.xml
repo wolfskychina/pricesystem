@@ -48,6 +48,8 @@
         <module>services/account-service</module>
         <module>services/outbox-relay-service</module>
         <module>services/gateway</module>
+        <module>services/notify-service</module>
+        <module>services/reconciliation-service</module>
         <module>sim/sim-exchange</module>
         <module>sim/sim-client</module>
         <module>tests/integration-tests</module>
