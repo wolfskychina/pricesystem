@@ -2,102 +2,121 @@
 
 ## 1. 技术栈
 
-| 技术 | 版本 | 用途 |
-|---|---|---|
-| React | 18.x | UI 框架 |
-| TypeScript | 5.x | 类型安全 |
-| Vite | 6.x | 构建工具 |
-| Tailwind CSS | 4.x | 样式框架 |
+采用**零依赖、零构建**的最简方案：
+
+| 技术 | 说明 |
+|---|---|
+| HTML5 | 页面结构 |
+| CSS3 | 样式（原生，不使用预处理器） |
+| 原生 JavaScript (ES5+) | 业务逻辑，无框架 |
+| Fetch API | HTTP 请求 |
+| setTimeout 轮询 | 数据定时刷新 |
+
+**零依赖**：无需 npm install、无需构建工具、打开即用。
 
 ## 2. 项目结构
 
 ```
 frontend/
-├── index.html
-├── package.json
-├── vite.config.ts
-├── tsconfig.json
-├── tailwind.config.ts
-├── postcss.config.js
-├── src/
-│   ├── main.tsx                # 入口
-│   ├── App.tsx                 # 根组件
-│   ├── index.css               # Tailwind 入口
-│   ├── api/
-│   │   ├── client.ts           # HTTP 客户端封装
-│   │   ├── market-data.ts      # 行情 API
-│   │   ├── pricing.ts          # 报价 API
-│   │   └── orders.ts           # 订单 API
-│   ├── types/
-│   │   └── index.ts            # 类型定义
-│   ├── hooks/
-│   │   └── usePolling.ts       # 轮询 Hook
-│   ├── components/
-│   │   ├── Header.tsx          # 顶部导航
-│   │   ├── QuoteTable.tsx      # 报价表格
-│   │   ├── OrderPanel.tsx      # 下单面板
-│   │   ├── OrderList.tsx       # 订单列表
-│   │   └── RefreshControl.tsx  # 刷新控制
-│   └── pages/
-│       └── Dashboard.tsx       # 主页面
+├── index.html           # 页面结构
+├── styles.css           # 样式
+├── app.js               # 业务逻辑
+└── .trae/
+    └── documents/
+        ├── prd.md       # 产品需求文档
+        └── tech-design.md  # 本文件
 ```
 
-## 3. 核心组件设计
+## 3. 核心模块设计
 
-### 3.1 API Client
+### 3.1 API 层 (app.js)
 
-- 基于 fetch 封装，支持 JSON 序列化/反序列化
-- 统一错误处理
-- 后端服务地址通过环境变量配置（VITE_API_BASE_URL）
+封装三个后端服务的 API 调用：
+- `fetchMarketData()` → GET `/api/market-data/marketdata`
+- `fetchQuote(symbol)` → GET `/api/pricing/quotes/{symbol}`
+- `fetchOrders()` → GET `/api/oms/orders`
+- `createOrder(data)` → POST `/api/oms/orders`
+- `cancelOrder(orderId)` → DELETE `/api/oms/orders/{orderId}`
 
-### 3.2 usePolling Hook
+HTTP 工具函数：`httpGet` / `httpPost` / `httpDelete`，统一错误处理。
 
-- 接收 API 调用函数和刷新间隔
-- 返回数据、加载状态、错误信息
+### 3.2 轮询机制
+
+- 行情数据 + 报价数据：同一轮询循环，每次刷新间隔刷新
+- 订单数据：独立轮询循环
+- 支持切换刷新频率（1s / 5s / 10s / 30s）
 - 支持暂停/恢复
-- 组件卸载时自动清理定时器
+- 使用 `setTimeout` 递归调用（而非 setInterval），避免请求积压
 
-### 3.3 QuoteTable 组件
+### 3.3 行情报价表
 
-- 接收行情数据和报价数据
-- 合并展示（交易所价格 + 银行报价）
-- 涨跌颜色：正数绿色，负数红色
-- 价格格式化：整数部分千分位，小数2位
+- 展示字段：合约代码、交易所买价、交易所卖价、最新价、银行买价、银行卖价、中间价、价差(bps)、涨跌、更新时间
+- 涨跌颜色：涨=绿，跌=红，平=灰
+- 银行报价列高亮（蓝色粗体 + 浅蓝背景）
+- 实时更新合约下拉选项
 
-### 3.4 OrderPanel 组件
+### 3.4 下单面板
 
-- 表单：合约选择、方向、类型、数量、价格
-- 提交调用 POST /orders
-- 成功后刷新订单列表
+- 客户ID、合约选择、买卖方向、订单类型（市价/限价）、数量、价格
+- 方向按钮：买入=红，卖出=绿
+- 限价单才显示价格输入框
+- 提交后显示成功/失败消息
 
-### 3.5 OrderList 组件
+### 3.5 订单列表
 
-- 表格展示订单列表
-- 状态标签：NEW(蓝)、PENDING_RISK(黄)、ACCEPTED(蓝)、FILLED(绿)、REJECTED(红)、CANCELLED(灰)
-- 未成交订单显示撤单按钮
+- 字段：订单ID、合约、方向、类型、数量、成交、价格、状态、时间、操作
+- 状态标签颜色：
+  - NEW / ACCEPTED：蓝色
+  - PENDING_RISK：黄色
+  - FILLED：绿色
+  - REJECTED：红色
+  - CANCELLED：灰色
+- NEW/PENDING_RISK/ACCEPTED 状态显示撤单按钮
 
 ## 4. 数据流
 
 ```
-Dashboard
-  ├── usePolling → GET /marketdata → 行情数据
-  ├── usePolling → GET /quotes/{symbol} → 报价数据
+页面加载
   │
-  ├── QuoteTable (行情 + 报价)
+  ├── startPolling()
+  │     ├── tickMarket()
+  │     │     ├── GET /marketdata        → 行情数据
+  │     │     └── GET /quotes/{symbol}   → 报价数据（每个合约）
+  │     │     └── renderQuoteTable()     → 渲染报价表
+  │     └── tickOrders()
+  │           └── GET /orders            → 订单数据
+  │           └── renderOrderList()      → 渲染订单列表
   │
-  └── Tab 切换
-      ├── OrderPanel → POST /orders
-      └── OrderList → GET /orders, DELETE /orders/{id}
+  ├── 用户操作
+  │     ├── 切换刷新频率 → 重启轮询
+  │     ├── 暂停/恢复 → 停止/启动轮询
+  │     ├── 手动刷新 → 立即执行一次
+  │     ├── 提交下单 → POST /orders → 刷新订单列表
+  │     └── 撤单 → DELETE /orders/{id} → 刷新订单列表
 ```
 
-## 5. 环境变量
+## 5. API 代理
 
-- `VITE_MARKET_DATA_URL`: market-data-service 地址 (默认 http://localhost:8082)
-- `VITE_PRICING_URL`: pricing-service 地址 (默认 http://localhost:8083)
-- `VITE_OMS_URL`: oms-service 地址 (默认 http://localhost:8084)
+前端通过路径前缀区分后端服务（建议由 Nginx 或 Vite 代理转发）：
 
-## 6. 构建与运行
+| 路径前缀 | 转发到 | 说明 |
+|---|---|---|
+| `/api/market-data` | http://localhost:8082 | 行情服务 |
+| `/api/pricing` | http://localhost:8083 | 报价服务 |
+| `/api/oms` | http://localhost:8084 | 订单服务 |
 
-- 开发：`pnpm dev` → http://localhost:5173
-- 构建：`pnpm build` → dist/
-- 预览：`pnpm preview`
+## 6. 运行方式
+
+**最简方式**：直接用浏览器打开 `index.html`（需配合后端服务 + 代理）。
+
+**本地开发**（推荐使用 Python 内置 http server 或 npx serve）：
+
+```bash
+# 方式1: Python
+cd frontend && python3 -m http.server 5173
+
+# 方式2: npx
+cd frontend && npx serve -l 5173 .
+```
+
+然后访问 http://localhost:5173

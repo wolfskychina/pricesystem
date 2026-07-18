@@ -1,13 +1,151 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>做市商报价监控面板</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>做市商报价监控面板</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <h1 class="header-title">做市商报价监控面板</h1>
+        <span class="header-subtitle">Bank Trading System</span>
+      </div>
+      <div class="header-right">
+        <span id="status-dot" class="status-dot status-disconnected"></span>
+        <span id="status-text" class="status-text">未连接</span>
+      </div>
+    </header>
+
+    <main class="main">
+      <!-- Toolbar -->
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <span class="toolbar-label">刷新频率:</span>
+          <div class="interval-buttons">
+            <button class="interval-btn" data-interval="1000">1s</button>
+            <button class="interval-btn active" data-interval="5000">5s</button>
+            <button class="interval-btn" data-interval="10000">10s</button>
+            <button class="interval-btn" data-interval="30000">30s</button>
+          </div>
+          <button id="pause-btn" class="control-btn control-amber">暂停</button>
+          <button id="refresh-btn" class="control-btn">刷新</button>
+        </div>
+        <div id="error-banner" class="error-banner hidden"></div>
+      </div>
+
+      <!-- Quote Table -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">行情报价</h2>
+        </div>
+        <div class="card-body">
+          <div id="quote-loading" class="empty-state">加载行情数据中...</div>
+          <div id="quote-empty" class="empty-state hidden">暂无行情数据</div>
+          <div id="quote-table-container" class="table-container hidden">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>合约代码</th>
+                  <th class="text-right">交易所买价</th>
+                  <th class="text-right">交易所卖价</th>
+                  <th class="text-right">最新价</th>
+                  <th class="text-right bank-col">银行买价</th>
+                  <th class="text-right bank-col">银行卖价</th>
+                  <th class="text-right">中间价</th>
+                  <th class="text-right">价差(bps)</th>
+                  <th class="text-right">涨跌</th>
+                  <th class="text-right">更新时间</th>
+                </tr>
+              </thead>
+              <tbody id="quote-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tabs: Order / Orders -->
+      <div class="card">
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="order">下单</button>
+          <button class="tab-btn" data-tab="orders">订单列表</button>
+        </div>
+        <div class="card-body">
+          <!-- Order Panel -->
+          <div id="tab-order" class="tab-content">
+            <form id="order-form" class="order-form">
+              <div class="form-grid">
+                <div class="form-item">
+                  <label class="form-label">客户ID</label>
+                  <input type="text" id="order-customerId" value="C001" class="form-input">
+                </div>
+                <div class="form-item">
+                  <label class="form-label">合约</label>
+                  <select id="order-symbol" class="form-input">
+                    <option value="AU2406">AU2406</option>
+                    <option value="AG2406">AG2406</option>
+                  </select>
+                </div>
+                <div class="form-item">
+                  <label class="form-label">方向</label>
+                  <div class="side-buttons">
+                    <button type="button" class="side-btn side-buy active" data-side="BUY">买入</button>
+                    <button type="button" class="side-btn side-sell" data-side="SELL">卖出</button>
+                  </div>
+                </div>
+                <div class="form-item">
+                  <label class="form-label">类型</label>
+                  <div class="side-buttons">
+                    <button type="button" class="type-btn active" data-type="MARKET">市价</button>
+                    <button type="button" class="type-btn" data-type="LIMIT">限价</button>
+                  </div>
+                </div>
+                <div class="form-item">
+                  <label class="form-label">数量</label>
+                  <input type="number" id="order-qty" value="1" min="0" step="any" class="form-input">
+                </div>
+                <div class="form-item hidden" id="price-item">
+                  <label class="form-label">价格</label>
+                  <input type="number" id="order-price" min="0" step="any" class="form-input">
+                </div>
+              </div>
+              <button type="submit" id="submit-order-btn" class="submit-btn">提交下单</button>
+              <div id="order-message" class="form-message hidden"></div>
+            </form>
+          </div>
+
+          <!-- Order List -->
+          <div id="tab-orders" class="tab-content hidden">
+            <div id="orders-loading" class="empty-state">加载订单中...</div>
+            <div id="orders-empty" class="empty-state hidden">暂无订单</div>
+            <div id="orders-table-container" class="table-container hidden">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>订单ID</th>
+                    <th>合约</th>
+                    <th class="text-center">方向</th>
+                    <th class="text-center">类型</th>
+                    <th class="text-right">数量</th>
+                    <th class="text-right">成交</th>
+                    <th class="text-right">价格</th>
+                    <th class="text-center">状态</th>
+                    <th class="text-right">时间</th>
+                    <th class="text-center">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="orders-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
 </html>
