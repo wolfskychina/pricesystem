@@ -1,0 +1,30 @@
+server:
+  port: 8085
+
+spring:
+  application:
+    name: risk-service
+
+risk:
+  default-credit-limit: 10000000
+  default-single-order-qty-limit: 1000
+  default-daily-trade-amount-limit: 5000000
+  default-position-limit: 5000
+  default-price-deviation-bps: 200
+
+  customer-limits:
+    - customerId: VIP001
+      creditLimit: 50000000
+      singleOrderQtyLimit: 5000
+      positionLimit: 20000
+    - customerId: INST001
+      creditLimit: 100000000
+      singleOrderQtyLimit: 10000
+      positionLimit: 50000
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+  instance:
+    prefer-ip-address: true
