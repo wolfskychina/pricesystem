@@ -16,14 +16,6 @@ public class WebSocketConfig implements WebSocketConfigurer {
         this.marketDataHandler = marketDataHandler;
     }
 
-    public WebSocketConfig(MarketDataWebSocketHandler marketDataHandler) {
-        this.marketDataHandler = marketDataHandler;
-    }
-
-    public WebSocketConfig(MarketDataWebSocketHandler marketDataHandler) {
-        this.marketDataHandler = marketDataHandler;
-    }
-
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(marketDataHandler, "/ws/marketdata")

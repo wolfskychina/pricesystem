@@ -16,14 +16,6 @@ public class ContractController {
         this.contractService = contractService;
     }
 
-    public ContractController(ContractService contractService) {
-        this.contractService = contractService;
-    }
-
-    public ContractController(ContractService contractService) {
-        this.contractService = contractService;
-    }
-
     @GetMapping
     public Result<List<ContractDTO>> listActiveContracts() {
         return Result.success(contractService.listActiveContracts());

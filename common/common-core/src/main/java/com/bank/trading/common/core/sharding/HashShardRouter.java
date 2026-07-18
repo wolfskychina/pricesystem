@@ -7,14 +7,6 @@ public class HashShardRouter implements ShardRouter {
     private final int totalShards;
 
     public HashShardRouter(int totalShards) {
-        this.totalShards = totalShards;
-    }
-
-    public HashShardRouter(int totalShards) {
-        this.totalShards = totalShards;
-    }
-
-    public HashShardRouter(int totalShards) {
         if (totalShards <= 0 || (totalShards & (totalShards - 1)) != 0) {
             throw new IllegalArgumentException("Total shards must be a positive power of 2");
         }

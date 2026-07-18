@@ -24,15 +24,6 @@ public class MarketDataWebSocketHandler extends TextWebSocketHandler {
         this.marketDataEngine = marketDataEngine;
     }
 
-    public MarketDataWebSocketHandler(MarketDataEngine marketDataEngine) {
-        this.marketDataEngine = marketDataEngine;
-    }
-
-    public MarketDataWebSocketHandler(MarketDataEngine marketDataEngine, List<WebSocketSession> sessions) {
-        this.marketDataEngine = marketDataEngine;
-        this.sessions = sessions;
-    }
-
     private final List<WebSocketSession> sessions = new CopyOnWriteArrayList<>();
 
     @Override

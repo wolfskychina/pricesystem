@@ -1,25 +1,15 @@
 package com.bank.trading.common.core.enums;
 
-enum CustomerLevel {
+import lombok.Getter;
 
-NORMAL("NORMAL", "普通客户"),
-VIP("VIP", "VIP客户"),
-INSTITUTION("INSTITUTION", "机构客户");
-
-    private final String code;
-    private final String desc;
-
-    public String getCode() {
-        return code;
-    }
-
-    public String getDesc() {
-        return desc;
-    }
-
+@Getter
+public enum CustomerLevel {
     NORMAL("NORMAL", "普通客户"),
     VIP("VIP", "VIP客户"),
     INSTITUTION("INSTITUTION", "机构客户");
+
+    private final String code;
+    private final String desc;
 
     CustomerLevel(String code, String desc) {
         this.code = code;

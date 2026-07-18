@@ -1,28 +1,19 @@
 package com.bank.trading.common.persistence.idempotent;
 
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
 import java.time.LocalDateTime;
 import java.util.function.Supplier;
 
+@Slf4j
 @Service
+@RequiredArgsConstructor
 public class IdempotentConsumer {
 
     private final ProcessedEventMapper processedEventMapper;
-
-    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(IdempotentConsumer.class);
-
-    public IdempotentConsumer(ProcessedEventMapper processedEventMapper) {
-        this.processedEventMapper = processedEventMapper;
-    }
-
-    public IdempotentConsumer(ProcessedEventMapper processedEventMapper) {
-        this.processedEventMapper = processedEventMapper;
-    }
-
-    public IdempotentConsumer(ProcessedEventMapper processedEventMapper) {
-        this.processedEventMapper = processedEventMapper;
-    }
 
     @Transactional
     public <T> T consume(String eventId, Supplier<T> action) {

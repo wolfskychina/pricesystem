@@ -19,16 +19,6 @@ public class MarketDataScheduler {
         this.properties = properties;
     }
 
-    public MarketDataScheduler(MarketDataEngine marketDataEngine, SimExchangeProperties properties) {
-        this.marketDataEngine = marketDataEngine;
-        this.properties = properties;
-    }
-
-    public MarketDataScheduler(MarketDataEngine marketDataEngine, SimExchangeProperties properties) {
-        this.marketDataEngine = marketDataEngine;
-        this.properties = properties;
-    }
-
     @EventListener(ApplicationReadyEvent.class)
     public void init() {
         double intervalSeconds = properties.getIntervalMs() / 1000.0;

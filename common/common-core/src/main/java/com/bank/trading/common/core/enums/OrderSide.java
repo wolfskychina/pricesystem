@@ -1,23 +1,14 @@
 package com.bank.trading.common.core.enums;
 
-enum OrderSide {
+import lombok.Getter;
 
-BUY("BUY", "买入"),
-SELL("SELL", "卖出");
+@Getter
+public enum OrderSide {
+    BUY("BUY", "买入"),
+    SELL("SELL", "卖出");
 
     private final String code;
     private final String desc;
-
-    public String getCode() {
-        return code;
-    }
-
-    public String getDesc() {
-        return desc;
-    }
-
-    BUY("BUY", "买入"),
-    SELL("SELL", "卖出");
 
     OrderSide(String code, String desc) {
         this.code = code;

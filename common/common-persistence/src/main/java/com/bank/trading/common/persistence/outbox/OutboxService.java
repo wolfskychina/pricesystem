@@ -2,41 +2,28 @@ package com.bank.trading.common.persistence.outbox;
 
 import com.alibaba.fastjson2.JSON;
 import com.bank.trading.common.core.event.BaseEvent;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+@Slf4j
 @Service
+@RequiredArgsConstructor
 public class OutboxService {
 
     private final OutboxMapper outboxMapper;
     private final KafkaTemplate<String, String> kafkaTemplate;
-    private static final int BATCH_SIZE;
-    private static final int MAX_RETRY;
 
-    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(OutboxService.class);
-
-    public OutboxService(OutboxMapper outboxMapper, KafkaTemplate<String, String> kafkaTemplate) {
-        this.outboxMapper = outboxMapper;
-        this.kafkaTemplate = kafkaTemplate;
-    }
-
-    public OutboxService(OutboxMapper outboxMapper, KafkaTemplate<String, String> kafkaTemplate) {
-        this.outboxMapper = outboxMapper;
-        this.kafkaTemplate = kafkaTemplate;
-    }
-
-    public OutboxService(OutboxMapper outboxMapper, KafkaTemplate<String, String> kafkaTemplate, Map<String, Boolean> sentCache) {
-        this.outboxMapper = outboxMapper;
-        this.kafkaTemplate = kafkaTemplate;
-        this.sentCache = sentCache;
-    }
-
+    private static final int BATCH_SIZE = 100;
+    private static final int MAX_RETRY = 10;
     private final Map<String, Boolean> sentCache = new ConcurrentHashMap<>();
 
     @Transactional

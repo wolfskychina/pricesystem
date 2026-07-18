@@ -17,14 +17,6 @@ public class MarketDataController {
         this.marketDataEngine = marketDataEngine;
     }
 
-    public MarketDataController(MarketDataEngine marketDataEngine) {
-        this.marketDataEngine = marketDataEngine;
-    }
-
-    public MarketDataController(MarketDataEngine marketDataEngine) {
-        this.marketDataEngine = marketDataEngine;
-    }
-
     @GetMapping("/{symbol}")
     public Result<MarketData> getMarketData(@PathVariable String symbol) {
         MarketData md = marketDataEngine.getLatest(symbol);

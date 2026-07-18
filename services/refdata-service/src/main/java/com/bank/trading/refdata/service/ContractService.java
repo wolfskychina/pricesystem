@@ -20,14 +20,6 @@ public class ContractService {
         this.contractMapper = contractMapper;
     }
 
-    public ContractService(ContractMapper contractMapper) {
-        this.contractMapper = contractMapper;
-    }
-
-    public ContractService(ContractMapper contractMapper) {
-        this.contractMapper = contractMapper;
-    }
-
     public List<ContractDTO> listActiveContracts() {
         return contractMapper.findAllActive().stream()
                 .map(this::toDTO)

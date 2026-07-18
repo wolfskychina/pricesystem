@@ -101,7 +101,7 @@ public class SymbolConfig {
         result = 31 * result + (initialPrice != null ? initialPrice.hashCode() : 0);
         long temp = Double.doubleToLongBits(volatility);
         result = 31 * result + (int) (temp ^ (temp >>> 32));
-        long temp = Double.doubleToLongBits(drift);
+        temp = Double.doubleToLongBits(drift);
         result = 31 * result + (int) (temp ^ (temp >>> 32));
         result = 31 * result + (tickSize != null ? tickSize.hashCode() : 0);
         result = 31 * result + (int) multiplier;

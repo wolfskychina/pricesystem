@@ -9,6 +9,7 @@ import java.util.Map;
 public class ShardRoutingDataSource extends AbstractRoutingDataSource {
 
     private final ShardRouter shardRouter;
+    private final Map<Integer, DataSource> dataSourceMap = new HashMap<>();
 
     public ShardRoutingDataSource(ShardRouter shardRouter) {
         this.shardRouter = shardRouter;
@@ -16,16 +17,6 @@ public class ShardRoutingDataSource extends AbstractRoutingDataSource {
 
     public ShardRouter getShardRouter() {
         return shardRouter;
-    }
-
-    public ShardRoutingDataSource(ShardRouter shardRouter) {
-        this.shardRouter = shardRouter;
-    }
-
-    private final Map<Integer, DataSource> dataSourceMap = new HashMap<>();
-
-    public ShardRoutingDataSource(ShardRouter shardRouter) {
-        this.shardRouter = shardRouter;
     }
 
     public void addDataSource(int shardId, DataSource dataSource) {

@@ -85,6 +85,10 @@ public class MarketDataEngine {
         return ticks.multiply(tickSize).setScale(tickSize.scale(), RoundingMode.HALF_UP);
     }
 
+    public List<String> getSymbols() {
+        return symbols;
+    }
+
     public MarketData getLatest(String symbol) {
         return latestMarketData.get(symbol);
     }

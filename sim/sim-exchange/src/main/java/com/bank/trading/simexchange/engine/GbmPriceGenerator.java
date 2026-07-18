@@ -16,13 +16,6 @@ public class GbmPriceGenerator {
         this.random = random;
     }
 
-    public GbmPriceGenerator(double drift, double volatility, double dt, Random random) {
-        this.drift = drift;
-        this.volatility = volatility;
-        this.dt = dt;
-        this.random = random;
-    }
-
     public GbmPriceGenerator(double drift, double volatility, double dtSeconds) {
         this.drift = drift;
         this.volatility = volatility;

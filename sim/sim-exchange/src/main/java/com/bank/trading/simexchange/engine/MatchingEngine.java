@@ -25,17 +25,6 @@ public class MatchingEngine {
         this.marketDataEngine = marketDataEngine;
     }
 
-    public MatchingEngine(MarketDataEngine marketDataEngine) {
-        this.marketDataEngine = marketDataEngine;
-    }
-
-    public MatchingEngine(MarketDataEngine marketDataEngine, Map<String, ExchangeOrder> orderMap, List<TradeFill> tradeFills, AtomicLong tradeIdGenerator) {
-        this.marketDataEngine = marketDataEngine;
-        this.orderMap = orderMap;
-        this.tradeFills = tradeFills;
-        this.tradeIdGenerator = tradeIdGenerator;
-    }
-
     private final Map<String, ExchangeOrder> orderMap = new ConcurrentHashMap<>();
     private final List<TradeFill> tradeFills = new ArrayList<>();
     private final AtomicLong tradeIdGenerator = new AtomicLong(0);
