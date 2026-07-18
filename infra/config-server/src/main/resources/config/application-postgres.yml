@@ -4,3 +4,11 @@ spring:
     url: jdbc:postgresql://localhost:5432/trading_{shard}
     username: postgres
     password: postgres
+  sql:
+    init:
+      mode: always
+      # PostgreSQL 建表脚本（与 sqlite profile 路径并列）
+      schema-locations: classpath:db/postgres/*.sql
+      # 初始数据脚本（仅 refdata-service 等服务在 db/postgres/data/ 下提供）
+      # 使用通配符，未提供 data 目录的服务会被自动跳过
+      data-locations: classpath:db/postgres/data/*.sql

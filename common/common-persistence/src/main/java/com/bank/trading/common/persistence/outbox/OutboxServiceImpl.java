@@ -4,26 +4,26 @@ import com.alibaba.fastjson2.JSON;
 import com.bank.trading.common.core.event.BaseEvent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Outbox 服务实现：负责在业务事务内将事件写入 outbox 表。
+ * <p>
+ * 消息投递（轮询 outbox 表 → 发送 Kafka）由独立的 outbox-relay-service 进程负责，
+ * 本类不再包含 relay 逻辑，保持职责单一。
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class OutboxServiceImpl implements OutboxService {
 
     private final OutboxMapper outboxMapper;
-    private final KafkaTemplate<String, String> kafkaTemplate;
 
-    private static final int BATCH_SIZE = 100;
-    private static final int MAX_RETRY = 10;
     private final Map<String, Boolean> sentCache = new ConcurrentHashMap<>();
 
     @Override
@@ -39,30 +39,6 @@ public class OutboxServiceImpl implements OutboxService {
         message.setCreatedAt(LocalDateTime.now());
         message.setShardId(shardId);
         outboxMapper.insert(message);
-    }
-
-    @Scheduled(fixedDelayString = "${outbox.relay.delay:100}")
-    public void relay() {
-        try {
-            List<OutboxMessage> messages = outboxMapper.findPending(0, BATCH_SIZE);
-            for (OutboxMessage msg : messages) {
-                if (msg.getRetryCount() >= MAX_RETRY) {
-                    outboxMapper.markFailed(msg.getId());
-                    log.error("Outbox message failed after {} retries: eventId={}", MAX_RETRY, msg.getEventId());
-                    continue;
-                }
-                try {
-                    kafkaTemplate.send(msg.getTopic(), msg.getPartitionKey(), msg.getPayload()).get();
-                    outboxMapper.markSent(msg.getId());
-                    sentCache.put(msg.getEventId(), true);
-                } catch (Exception e) {
-                    log.warn("Failed to send outbox message: eventId={}, error={}", msg.getEventId(), e.getMessage());
-                    outboxMapper.markFailed(msg.getId());
-                }
-            }
-        } catch (Exception e) {
-            log.error("Outbox relay error", e);
-        }
     }
 
     @Override

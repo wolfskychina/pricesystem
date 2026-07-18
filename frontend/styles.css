@@ -496,3 +496,25 @@ body {
 .cancel-btn:hover {
   background-color: #fee2e2;
 }
+
+/* Credit Info */
+.credit-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 4px;
+  background-color: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.credit-label {
+  color: #64748b;
+  font-weight: 500;
+}
+
+.credit-sep {
+  color: #cbd5e1;
+  margin: 0 4px;
+}

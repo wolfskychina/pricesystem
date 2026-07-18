@@ -67,11 +67,39 @@
         </div>
       </div>
 
-      <!-- Tabs: Order / Orders -->
+      <!-- Exposure Table -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">净敞口监控</h2>
+        </div>
+        <div class="card-body">
+          <div id="exposure-loading" class="empty-state">加载敞口数据中...</div>
+          <div id="exposure-empty" class="empty-state hidden">暂无敞口数据</div>
+          <div id="exposure-table-container" class="table-container hidden">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>合约代码</th>
+                  <th class="text-right">客户总头寸</th>
+                  <th class="text-right">对冲头寸</th>
+                  <th class="text-right">净敞口</th>
+                  <th class="text-right">净敞口金额</th>
+                  <th class="text-right">对冲覆盖率</th>
+                  <th class="text-right">更新时间</th>
+                </tr>
+              </thead>
+              <tbody id="exposure-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tabs: Order / Orders / Hedge Orders -->
       <div class="card">
         <div class="tabs">
           <button class="tab-btn active" data-tab="order">下单</button>
           <button class="tab-btn" data-tab="orders">订单列表</button>
+          <button class="tab-btn" data-tab="hedge">对冲订单</button>
         </div>
         <div class="card-body">
           <!-- Order Panel -->
@@ -112,6 +140,16 @@
                   <input type="number" id="order-price" min="0" step="any" class="form-input">
                 </div>
               </div>
+              <div id="credit-info" class="credit-info hidden">
+                <span class="credit-label">信用额度:</span>
+                <span id="credit-limit">-</span>
+                <span class="credit-sep">|</span>
+                <span class="credit-label">已用:</span>
+                <span id="credit-used">-</span>
+                <span class="credit-sep">|</span>
+                <span class="credit-label">可用:</span>
+                <span id="credit-available">-</span>
+              </div>
               <button type="submit" id="submit-order-btn" class="submit-btn">提交下单</button>
               <div id="order-message" class="form-message hidden"></div>
             </form>
@@ -138,6 +176,30 @@
                   </tr>
                 </thead>
                 <tbody id="orders-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Hedge Orders -->
+          <div id="tab-hedge" class="tab-content hidden">
+            <div id="hedge-loading" class="empty-state">加载对冲订单中...</div>
+            <div id="hedge-empty" class="empty-state hidden">暂无对冲订单</div>
+            <div id="hedge-table-container" class="table-container hidden">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>对冲订单ID</th>
+                    <th>合约</th>
+                    <th class="text-center">方向</th>
+                    <th class="text-right">数量</th>
+                    <th class="text-right">成交</th>
+                    <th class="text-right">均价</th>
+                    <th class="text-center">状态</th>
+                    <th class="text-center">类型</th>
+                    <th class="text-right">时间</th>
+                  </tr>
+                </thead>
+                <tbody id="hedge-tbody"></tbody>
               </table>
             </div>
           </div>

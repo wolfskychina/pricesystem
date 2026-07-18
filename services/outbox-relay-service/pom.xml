@@ -11,15 +11,11 @@
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
-    <artifactId>position-service</artifactId>
-    <name>position-service</name>
-    <description>Position Service - 持仓管理服务</description>
+    <artifactId>outbox-relay-service</artifactId>
+    <name>outbox-relay-service</name>
+    <description>Outbox Relay Service - 独立进程轮询 outbox 表并发送 Kafka</description>
 
     <dependencies>
-        <dependency>
-            <groupId>com.bank.trading</groupId>
-            <artifactId>common-core</artifactId>
-        </dependency>
         <dependency>
             <groupId>com.bank.trading</groupId>
             <artifactId>common-persistence</artifactId>
@@ -27,12 +23,7 @@
 
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
-        </dependency>
-
-        <dependency>
-            <groupId>org.springframework.cloud</groupId>
-            <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+            <artifactId>spring-boot-starter</artifactId>
         </dependency>
 
         <dependency>
@@ -43,13 +34,11 @@
         <dependency>
             <groupId>org.xerial</groupId>
             <artifactId>sqlite-jdbc</artifactId>
-            <scope>test</scope>
         </dependency>
 
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <scope>test</scope>
         </dependency>
 
         <dependency>

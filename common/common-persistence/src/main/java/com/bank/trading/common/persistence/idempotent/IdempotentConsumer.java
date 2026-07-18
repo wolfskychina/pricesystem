@@ -15,7 +15,7 @@ import java.util.function.Supplier;
  * 重复消息。本服务通过 processed_events 表记录已处理事件 ID，保证同一事件
  * 只被业务处理一次，实现幂等消费。</p>
  *
- * <p><b>幂等机制：</b>利用数据库主键唯一约束 + {@code INSERT OR IGNORE} 语法，
+ * <p><b>幂等机制：</b>利用数据库主键唯一约束 + {@code INSERT ... ON CONFLICT DO NOTHING} 语法，
  * 在事务内先尝试插入 event_id：
  * <ul>
  *   <li>插入成功（影响行数=1）→ 事件首次处理，执行业务动作；</li>

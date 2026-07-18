@@ -1,0 +1,29 @@
+spring:
+  application:
+    name: outbox-relay-service
+  profiles:
+    active: sqlite
+  datasource:
+    driver-class-name: org.sqlite.JDBC
+    url: jdbc:sqlite:./data/outbox.db
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      acks: all
+      enable-idempotence: true
+      retries: 3
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+mybatis:
+  mapper-locations: classpath:mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+
+# Outbox Relay 配置
+outbox:
+  relay:
+    delay: 100        # 轮询间隔（毫秒）
+    batch-size: 100   # 单次拉取上限
+    max-retry: 10     # 最大重试次数
+    shard-id: 0       # 分片编号（多实例时各实例配置不同 shard-id）

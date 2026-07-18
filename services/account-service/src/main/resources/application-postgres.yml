@@ -1,0 +1,11 @@
+# PostgreSQL profile - 通过 --spring.profiles.active=postgres 激活
+spring:
+  datasource:
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://localhost:5432/account
+    username: postgres
+    password: postgres
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/postgres/*.sql

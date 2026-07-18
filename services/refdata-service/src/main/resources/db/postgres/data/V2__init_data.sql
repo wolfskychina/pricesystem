@@ -1,5 +1,5 @@
--- refdata-service 初始合约数据
--- 使用 ON CONFLICT DO NOTHING（SQLite 3.24+ 与 PostgreSQL 均支持）
+-- refdata-service PostgreSQL 初始合约数据
+-- 使用 ON CONFLICT DO NOTHING（与 SQLite 3.24+ 共用同一语法）
 
 INSERT INTO contract (code, name, exchange, product, multiplier, tick_size, min_qty, listed_date, expiry_date, status, created_at, updated_at)
 VALUES ('AU2406', '黄金2406', 'SHFE', '黄金', 1000, 0.02, 1, '2024-01-15', '2024-06-15', 'ACTIVE', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)

@@ -46,6 +46,12 @@
             <scope>test</scope>
         </dependency>
 
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+
         <!-- sim-exchange 作为测试依赖，用于端到端集成测试（桥接 MatchingEngine） -->
         <dependency>
             <groupId>com.bank.trading</groupId>

@@ -393,30 +393,8 @@ class FullChainIntegrationTest {
         positionService.onTradeEvent(buyEvent);
         accountService.onTradeEvent(buyEvent);
         hedgeBatcher.enqueue(buyEvent);
-        String hedgeOrderId = hedgeOrderMapper.orders.get(hedgeOrderMapper.orders.size() - 1).getHedgeOrderId();
-        System.out.println("DEBUG: hedgeOrderId=" + hedgeOrderId);
-        System.out.println("DEBUG: hedgeOrder side=" + hedgeOrderMapper.orders.get(0).getSide());
-        System.out.println("DEBUG: hedgeOrder exchangeOrderId=" + hedgeOrderMapper.orders.get(0).getExchangeOrderId());
-        // 检查 hedgeFillTopic 的值
-        try {
-            java.lang.reflect.Field f = executionService.getClass().getDeclaredField("hedgeFillTopic");
-            f.setAccessible(true);
-            System.out.println("DEBUG: hedgeFillTopic=" + f.get(executionService));
-        } catch (Exception e) {
-            System.out.println("DEBUG: failed to get hedgeFillTopic: " + e.getMessage());
-        }
-        awaitHedgeOrderFilled(hedgeOrderId, 2000);
-        System.out.println("DEBUG: after await, hedgeOrder status=" + hedgeOrderMapper.findByHedgeOrderId(hedgeOrderId).getStatus());
-        System.out.println("DEBUG: hedgeTrade count=" + hedgeTradeMapper.trades.size());
-        for (HedgeTrade t : hedgeTradeMapper.trades) {
-            System.out.println("DEBUG: hedgeTrade id=" + t.getExchangeTradeId() + ", orderId=" + t.getHedgeOrderId());
-        }
-        System.out.println("DEBUG: all sent messages: " + kafkaTemplate.sentMessages.size());
-        for (CapturingKafkaTemplate.SentMessage m : kafkaTemplate.sentMessages) {
-            System.out.println("DEBUG: topic=" + m.topic + ", key=" + m.key);
-        }
+        awaitHedgeOrderFilled(hedgeOrderMapper.orders.get(hedgeOrderMapper.orders.size() - 1).getHedgeOrderId(), 2000);
         List<CapturingKafkaTemplate.SentMessage> hedgeEvents = kafkaTemplate.getByTopic("hedge-fill-event");
-        System.out.println("DEBUG: hedgeEvents size=" + hedgeEvents.size());
         HedgeFillEvent buyHedgeEvent = JSON.parseObject(
                 hedgeEvents.get(hedgeEvents.size() - 1).value, HedgeFillEvent.class);
         positionService.onHedgeFillEvent(buyHedgeEvent);
@@ -546,16 +524,32 @@ class FullChainIntegrationTest {
 
     private void awaitHedgeOrderFilled(String hedgeOrderId, long timeoutMs) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMs;
+        // 第一阶段：等待对冲订单状态变为 FILLED
         while (System.currentTimeMillis() < deadline) {
             HedgeOrder order = hedgeOrderMapper.findByHedgeOrderId(hedgeOrderId);
             if (order != null && "FILLED".equals(order.getStatus())) {
-                return;
+                break;
             }
             Thread.sleep(20);
         }
+        // 第二阶段：等待 onTradeNotification 完成（hedgeTrade 被创建 + hedge-fill-event 被发布）
+        // MatchingEngine 异步流程：先 notifyOrderUpdate(FILLED)，后 notifyTrade
+        // onTradeNotification 中先 insert hedgeTrade，后 publishHedgeFillEvent
+        while (System.currentTimeMillis() < deadline) {
+            boolean hasTrade = hedgeTradeMapper.trades.stream()
+                    .anyMatch(t -> hedgeOrderId.equals(t.getHedgeOrderId()));
+            if (hasTrade) {
+                break;
+            }
+            Thread.sleep(20);
+        }
+        // 第三阶段：短暂等待，确保 publishHedgeFillEvent 执行完成（hedgeTrade 已创建但事件可能还没发送）
+        Thread.sleep(50);
         HedgeOrder order = hedgeOrderMapper.findByHedgeOrderId(hedgeOrderId);
-        fail("对冲订单超时未成交: " + hedgeOrderId + ", 当前状态: "
-                + (order != null ? order.getStatus() : "null"));
+        if (!"FILLED".equals(order.getStatus())) {
+            fail("对冲订单超时未成交: " + hedgeOrderId + ", 当前状态: "
+                    + (order != null ? order.getStatus() : "null"));
+        }
     }
 
     private void assertDecimalEquals(BigDecimal expected, BigDecimal actual) {

@@ -9,6 +9,9 @@
   var MARKET_DATA_URL = '/api/market-data';
   var PRICING_URL = '/api/pricing';
   var OMS_URL = '/api/oms';
+  var POSITION_URL = '/api/position';
+  var EXECUTION_URL = '/api/execution';
+  var ACCOUNT_URL = '/api/accounts';
 
   // ---- 状态 ----
   var state = {
@@ -20,9 +23,16 @@
     marketData: [],
     quotes: {},
     orders: [],
+    exposures: [],
+    hedgeOrders: [],
+    creditInfo: null,
+    retryCount: 0,
+    maxRetry: 5,
     timers: {
       market: null,
       orders: null,
+      exposure: null,
+      hedge: null,
     },
   };
 
@@ -134,6 +144,18 @@
     return httpDelete(OMS_URL + '/orders/' + orderId);
   }
 
+  function fetchNetExposure() {
+    return httpGet(POSITION_URL + '/positions/exposure');
+  }
+
+  function fetchHedgeOrders() {
+    return httpGet(EXECUTION_URL + '/execution/orders?limit=50');
+  }
+
+  function fetchCredit(customerId) {
+    return httpGet(ACCOUNT_URL + '/accounts/' + customerId + '/credit');
+  }
+
   // ---- 轮询管理 ----
   function startPolling() {
     stopPolling();
@@ -144,6 +166,7 @@
       fetchMarketData()
         .then(function (data) {
           state.marketData = data || [];
+          state.retryCount = 0;
           setConnected(true);
           hideError();
 
@@ -167,8 +190,7 @@
           renderQuoteTable();
         })
         .catch(function (err) {
-          setConnected(false);
-          showError('行情连接错误: ' + err.message);
+          handlePollError('行情连接错误: ' + err.message);
         });
 
       state.timers.market = setTimeout(tickMarket, state.refreshInterval);
@@ -188,18 +210,61 @@
       state.timers.orders = setTimeout(tickOrders, state.refreshInterval);
     }
 
+    // 敞口轮询
+    function tickExposure() {
+      fetchNetExposure()
+        .then(function (data) {
+          state.exposures = data || [];
+          renderExposureTable();
+        })
+        .catch(function () {
+          // 敞口错误不显示全局错误
+        });
+
+      state.timers.exposure = setTimeout(tickExposure, state.refreshInterval);
+    }
+
+    // 对冲订单轮询
+    function tickHedge() {
+      fetchHedgeOrders()
+        .then(function (data) {
+          state.hedgeOrders = data || [];
+          renderHedgeTable();
+        })
+        .catch(function () {
+          // 对冲订单错误不显示全局错误
+        });
+
+      state.timers.hedge = setTimeout(tickHedge, state.refreshInterval);
+    }
+
     tickMarket();
     tickOrders();
+    tickExposure();
+    tickHedge();
   }
 
   function stopPolling() {
-    if (state.timers.market) {
-      clearTimeout(state.timers.market);
-      state.timers.market = null;
+    var keys = Object.keys(state.timers);
+    for (var i = 0; i < keys.length; i++) {
+      if (state.timers[keys[i]]) {
+        clearTimeout(state.timers[keys[i]]);
+        state.timers[keys[i]] = null;
+      }
     }
-    if (state.timers.orders) {
-      clearTimeout(state.timers.orders);
-      state.timers.orders = null;
+  }
+
+  // ---- 轮询错误处理（自动重连） ----
+  function handlePollError(msg) {
+    state.retryCount++;
+    setConnected(false);
+
+    if (state.retryCount >= state.maxRetry) {
+      showError(msg + ' (已达最大重试次数 ' + state.maxRetry + '，请检查后端服务)');
+      // 达到最大重试后降低频率继续尝试
+      state.retryCount = 0;
+    } else {
+      showError(msg + ' (重试 ' + state.retryCount + '/' + state.maxRetry + ')');
     }
   }
 
@@ -330,6 +395,98 @@
     }
   }
 
+  // ---- 渲染: 净敞口表 ----
+  function renderExposureTable() {
+    var loading = $('exposure-loading');
+    var empty = $('exposure-empty');
+    var container = $('exposure-table-container');
+    var tbody = $('exposure-tbody');
+
+    var data = state.exposures;
+
+    if (!data || data.length === 0) {
+      loading.classList.add('hidden');
+      container.classList.add('hidden');
+      empty.classList.remove('hidden');
+      return;
+    }
+
+    loading.classList.add('hidden');
+    empty.classList.add('hidden');
+    container.classList.remove('hidden');
+
+    var html = '';
+    for (var i = 0; i < data.length; i++) {
+      var e = data[i];
+      var netQty = e.netQty !== undefined ? e.netQty : (e.customerQty - e.hedgeQty);
+      var hedgeRatio = e.customerQty !== 0 && e.customerQty !== undefined
+        ? (Math.abs(e.hedgeQty / e.customerQty) * 100).toFixed(1) + '%'
+        : '-';
+      var netColor = netQty > 0 ? 'text-red' : netQty < 0 ? 'text-green' : 'text-slate';
+      var netSign = netQty > 0 ? '+' : '';
+
+      html += '<tr>'
+        + '<td class="symbol-cell">' + escapeHtml(e.symbol) + '</td>'
+        + '<td class="text-right tabular-nums">' + formatQty(e.customerQty) + '</td>'
+        + '<td class="text-right tabular-nums">' + formatQty(e.hedgeQty) + '</td>'
+        + '<td class="text-right tabular-nums ' + netColor + '" style="font-weight:600">' + netSign + formatQty(netQty) + '</td>'
+        + '<td class="text-right tabular-nums ' + netColor + '">' + (e.netAmount ? formatPrice(e.netAmount) : '-') + '</td>'
+        + '<td class="text-right tabular-nums text-slate">' + hedgeRatio + '</td>'
+        + '<td class="text-right time-cell">' + formatTime(e.updatedAt || e.timestamp) + '</td>'
+        + '</tr>';
+    }
+
+    tbody.innerHTML = html;
+  }
+
+  // ---- 渲染: 对冲订单表 ----
+  function renderHedgeTable() {
+    var loading = $('hedge-loading');
+    var empty = $('hedge-empty');
+    var container = $('hedge-table-container');
+    var tbody = $('hedge-tbody');
+
+    var data = state.hedgeOrders;
+
+    if (!data || data.length === 0) {
+      loading.classList.add('hidden');
+      container.classList.add('hidden');
+      empty.classList.remove('hidden');
+      return;
+    }
+
+    loading.classList.add('hidden');
+    empty.classList.add('hidden');
+    container.classList.remove('hidden');
+
+    var html = '';
+    for (var i = 0; i < data.length; i++) {
+      var h = data[i];
+      var sideColor = h.side === 'BUY' ? 'text-red' : 'text-green';
+      var sideText = h.side === 'BUY' ? '买' : '卖';
+      var batched = h.isBatched === 1 ? '聚合' : '单笔';
+
+      html += '<tr>'
+        + '<td class="order-id-cell">' + escapeHtml((h.hedgeOrderId || '').slice(0, 12)) + '</td>'
+        + '<td>' + escapeHtml(h.symbol) + '</td>'
+        + '<td class="text-center"><span class="' + sideColor + '" style="font-weight:500">' + sideText + '</span></td>'
+        + '<td class="text-right tabular-nums">' + formatQty(h.qty) + '</td>'
+        + '<td class="text-right tabular-nums">' + formatQty(h.filledQty) + '</td>'
+        + '<td class="text-right tabular-nums">' + (h.avgPrice && h.avgPrice > 0 ? formatPrice(h.avgPrice) : '-') + '</td>'
+        + '<td class="text-center"><span class="status-tag ' + statusClass(h.status) + '">' + h.status + '</span></td>'
+        + '<td class="text-center text-slate">' + batched + '</td>'
+        + '<td class="text-right time-cell">' + formatDateTime(h.createdAt) + '</td>'
+        + '</tr>';
+    }
+
+    tbody.innerHTML = html;
+  }
+
+  function formatQty(value) {
+    if (value === null || value === undefined || isNaN(value)) return '-';
+    return Number(value).toFixed(2);
+  }
+
   // ---- 连接状态 ----
   function setConnected(connected) {
     var dot = $('status-dot');
@@ -413,6 +570,7 @@
     // 切换内容
     $('tab-order').classList.toggle('hidden', tab !== 'order');
     $('tab-orders').classList.toggle('hidden', tab !== 'orders');
+    $('tab-hedge').classList.toggle('hidden', tab !== 'hedge');
   }
 
   function handleSideClick(e) {
@@ -489,11 +647,21 @@
           '下单成功: ' + order.side + ' ' + order.qty + ' ' + order.symbol,
           'success'
         );
-        // 刷新订单列表
-        return fetchOrders();
+        // 刷新订单列表 + 信用额度 + 敞口
+        return Promise.all([
+          fetchOrders(),
+          fetchCredit(customerId).then(function (c) {
+            state.creditInfo = c;
+            renderCreditInfo();
+          }).catch(function () {}),
+          fetchNetExposure().then(function (data) {
+            state.exposures = data || [];
+            renderExposureTable();
+          }).catch(function () {}),
+        ]);
       })
-      .then(function (data) {
-        state.orders = data || [];
+      .then(function (results) {
+        state.orders = results && results[0] ? results[0] : [];
         renderOrderList();
       })
       .catch(function (err) {
@@ -510,6 +678,37 @@
     msgEl.textContent = text;
     msgEl.className = 'form-message ' + type;
     msgEl.classList.remove('hidden');
+  }
+
+  // ---- 信用额度 ----
+  function renderCreditInfo() {
+    var container = $('credit-info');
+    if (!state.creditInfo) {
+      container.classList.add('hidden');
+      return;
+    }
+    container.classList.remove('hidden');
+    $('credit-limit').textContent = formatPrice(state.creditInfo.creditLimit);
+    $('credit-used').textContent = formatPrice(state.creditInfo.usedCredit);
+    $('credit-available').textContent = formatPrice(state.creditInfo.availableCredit);
+  }
+
+  function loadCreditInfo() {
+    var customerId = $('order-customerId').value.trim();
+    if (!customerId) {
+      state.creditInfo = null;
+      renderCreditInfo();
+      return;
+    }
+    fetchCredit(customerId)
+      .then(function (c) {
+        state.creditInfo = c;
+        renderCreditInfo();
+      })
+      .catch(function () {
+        state.creditInfo = null;
+        renderCreditInfo();
+      });
   }
 
   function handleCancelClick(e) {
@@ -549,6 +748,13 @@
     document.querySelector('.side-buttons').addEventListener('click', handleSideClick);
     document.querySelectorAll('.type-btn')[0].parentNode.addEventListener('click', handleTypeClick);
     $('order-form').addEventListener('submit', handleOrderSubmit);
+
+    // 客户 ID 变化时加载信用额度
+    $('order-customerId').addEventListener('change', loadCreditInfo);
+    $('order-customerId').addEventListener('blur', loadCreditInfo);
+
+    // 初始加载信用额度
+    loadCreditInfo();
 
     // 启动轮询
     startPolling();

@@ -46,6 +46,7 @@
         <module>services/execution-service</module>
         <module>services/position-service</module>
         <module>services/account-service</module>
+        <module>services/outbox-relay-service</module>
         <module>sim/sim-exchange</module>
         <module>tests/integration-tests</module>
     </modules>
