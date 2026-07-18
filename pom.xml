@@ -45,6 +45,7 @@
         <module>services/risk-service</module>
         <module>services/execution-service</module>
         <module>services/position-service</module>
+        <module>services/account-service</module>
         <module>sim/sim-exchange</module>
     </modules>
 
