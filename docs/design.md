@@ -136,11 +136,26 @@
 - REST: `POST /risk/pre-trade` 同步调用
 
 ### 3.5 execution-service（对冲执行服务）
-- 消费 `trade-event`
-- 计算对冲方向和数量
-- 调用模拟交易所 REST 下单
-- 接收期货成交通知，回写持仓
-- 发布 `hedge-fill-event`
+- 消费 `trade-event`（Kafka topic: trade-event）
+- 计算对冲方向（与客户成交相反）和数量（× hedge-ratio，默认全额对冲）
+- 通过 ExchangeSessionClient 调用 sim-exchange 下单（同步受理，返回 NEW）
+- 接收 sim-exchange Webhook 回调（订单状态回报 + 成交通知），更新对冲订单状态为 FILLED
+- 发布 `hedge-fill-event`（Kafka topic: hedge-fill-event）到 Kafka
+- REST: `GET /execution/orders`、`GET /execution/orders/{id}/trades`
+- 端口 8086
+
+**与 sim-exchange 的异步两阶段交互**：
+```
+1. TradeEventConsumer 收到 trade-event → ExecutionService.onTradeEvent
+2. ExecutionService → ExchangeSessionClient.submitOrder (POST /exchange/orders)
+   - sim-exchange 同步返回订单受理（NEW）
+3. sim-exchange 异步撮合后通过 Webhook 回调：
+   - POST /execution/callback/order  → ExecutionService.onOrderNotification（状态回报）
+   - POST /execution/callback/trade  → ExecutionService.onTradeNotification（成交通知）
+4. ExecutionService 发布 HedgeFillEvent 到 Kafka hedge-fill-event topic
+```
+
+**数据表**：hedge_orders（对冲订单）、hedge_trades（对冲成交流水）
 
 ### 3.6 position-service（持仓管理服务）
 - 消费 `trade-event` 更新客户头寸

@@ -43,6 +43,7 @@
         <module>services/pricing-service</module>
         <module>services/oms-service</module>
         <module>services/risk-service</module>
+        <module>services/execution-service</module>
         <module>sim/sim-exchange</module>
     </modules>
 

@@ -1,0 +1,52 @@
+server:
+  port: 8086
+
+spring:
+  application:
+    name: execution-service
+  profiles:
+    active: sqlite
+  datasource:
+    driver-class-name: org.sqlite.JDBC
+    url: jdbc:sqlite:./data/execution.db
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: execution-service
+      auto-offset-reset: latest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      enable-auto-commit: false
+    producer:
+      acks: all
+      enable-idempotence: true
+      retries: 3
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+mybatis:
+  mapper-locations: classpath:mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+
+execution:
+  # 消费的客户成交事件 topic
+  trade-topic: trade-event
+  # 发布的对冲成交事件 topic
+  hedge-fill-topic: hedge-fill-event
+  # 模拟交易所 REST 基础地址
+  exchange-base-url: http://localhost:8081
+  # 本服务对外暴露的回调接收基础地址（sim-exchange 推送 webhook 到此地址）
+  # 部署时需改为可被 sim-exchange 访问的实际地址
+  callback-base-url: http://localhost:8086/execution/callback
+  # 对冲下单类型：MARKET（市价对冲，立即成交）/ LIMIT（限价对冲）
+  hedge-order-type: MARKET
+  # 对冲比例：1.0 = 全额对冲（100%），0.5 = 半额对冲
+  hedge-ratio: 1.0
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+  instance:
+    prefer-ip-address: true
