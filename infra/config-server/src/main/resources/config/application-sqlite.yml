@@ -1,0 +1,10 @@
+spring:
+  datasource:
+    driver-class-name: org.sqlite.JDBC
+    url: jdbc:sqlite:./data/{shard}_trading.db
+    username:
+    password:
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/sqlite/*.sql

@@ -1,0 +1,49 @@
+server:
+  port: 9000
+
+spring:
+  application:
+    name: sim-exchange
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+  instance:
+    prefer-ip-address: true
+
+sim-exchange:
+  interval-ms: 1000
+  symbols:
+    - code: "AU2406"
+      name: "黄金2406"
+      initial-price: 520.50
+      volatility: 0.15
+      drift: 0.05
+      tick-size: 0.02
+      multiplier: 1000
+      min-qty: 1
+    - code: "AG2406"
+      name: "白银2406"
+      initial-price: 6280.0
+      volatility: 0.25
+      drift: 0.03
+      tick-size: 1.0
+      multiplier: 15
+      min-qty: 1
+    - code: "CU2406"
+      name: "铜2406"
+      initial-price: 72500.0
+      volatility: 0.20
+      drift: 0.02
+      tick-size: 10.0
+      multiplier: 5
+      min-qty: 1
+    - code: "RB2406"
+      name: "螺纹钢2406"
+      initial-price: 3680.0
+      volatility: 0.18
+      drift: 0.01
+      tick-size: 1.0
+      multiplier: 10
+      min-qty: 1
