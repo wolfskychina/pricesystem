@@ -46,6 +46,14 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- sim-exchange 作为测试依赖，用于端到端集成测试（桥接 MatchingEngine） -->
+        <dependency>
+            <groupId>com.bank.trading</groupId>
+            <artifactId>sim-exchange</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
