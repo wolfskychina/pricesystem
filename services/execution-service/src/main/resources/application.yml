@@ -43,6 +43,10 @@ execution:
   hedge-order-type: MARKET
   # 对冲比例：1.0 = 全额对冲（100%），0.5 = 半额对冲
   hedge-ratio: 1.0
+  # 对冲聚合（batching）配置
+  batching-enabled: true       # 是否开启对冲聚合（开发环境开启以便验证）
+  batching-window-ms: 1000     # 聚合时间窗口（毫秒），开发环境 1s，生产环境建议 200ms
+  batching-size-threshold: 50  # 数量阈值（手），单桶累计超此值立即出桶
 
 eureka:
   client:

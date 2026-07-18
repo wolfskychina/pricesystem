@@ -155,7 +155,34 @@
 4. ExecutionService 发布 HedgeFillEvent 到 Kafka hedge-fill-event topic
 ```
 
-**数据表**：hedge_orders（对冲订单）、hedge_trades（对冲成交流水）
+**数据表**：hedge_orders（对冲订单）、hedge_trades（对冲成交流水）、hedge_batch_items（聚合子项）
+
+**对冲聚合（Hedge Batching）**：
+短时间内同合约、同方向的多笔客户成交合并为一笔对冲单提交交易所，减少订单数量、降低手续费与市场冲击成本。
+- 聚合粒度：按 `symbol + side` 分组（同一合约同一对冲方向合并）
+- 双触发机制：
+  - **时间窗口**：每 `batching-window-ms` 毫秒定时出桶（开发环境 1000ms，生产环境建议 200ms）
+  - **数量阈值**：单桶累计数量 ≥ `batching-size-threshold`（默认 50 手）立即出桶
+- 分摊规则（市价单）：所有子项成交价相同，按数量比例分摊，最后一项吸收尾差
+- 事件发布：聚合订单成交后，按原始成交笔数逐笔发布 hedge-fill-event（position-service 消费模型不变）
+- 可配置开关：`execution.batching-enabled`，关闭时回退为一笔成交一笔对冲
+
+**对冲聚合数据流**：
+```
+trade-event → HedgeBatcher.enqueue
+  ├─ batchingEnabled=false → ExecutionService.onTradeEventImmediate（单笔立即对冲）
+  └─ batchingEnabled=true  → 入桶（hedge_batch_items 状态=PENDING）
+       ├─ 时间窗口触发（@Scheduled fixedDelay）
+       └─ 数量阈值触发（入桶时检查）
+            → ExecutionService.submitBatchedOrder（聚合提交）
+                 → hedge_orders.isBatched=1 + 子项状态=SUBMITTED
+                 → ExchangeSessionClient.submitOrder（同步受理）
+                 → sim-exchange 异步撮合
+                      → Webhook /execution/callback/trade
+                           → ExecutionService.onTradeNotification
+                                → 按子项数量比例分摊
+                                → 逐笔发布 hedge-fill-event（每原始成交1条）
+```
 
 ### 3.6 position-service（持仓管理服务）
 - 消费 `trade-event` 更新客户头寸
@@ -310,6 +337,14 @@ TradeEvent {
 }
 ```
 消费端发现跳号 → 告警 + 主动从 event_store 补偿。
+
+**跨客户时序说明**：
+做市商对客户是"对手方成交"（principal-to-principal），而非交易所撮合模式。
+客户 A 与客户 B 的成交是相互独立的双边交易，做市商的义务是"持续报价 + 按报价成交"，
+而非"按请求到达顺序先后处理"。因此：
+- 同客户事件需严格保序（先买先扣持仓、先成交先扣信用）—— 通过 customerId 分区保证 ✅
+- 跨客户状态相互独立，可并行处理 —— 多分区并行消费即可
+- 做市商全局敞口是"最终一致"的聚合读模型，毫秒级延迟可接受，无需全局 FIFO
 
 ### 4.4 幂等消费
 

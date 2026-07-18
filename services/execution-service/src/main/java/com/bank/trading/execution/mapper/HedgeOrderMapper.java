@@ -20,10 +20,11 @@ public interface HedgeOrderMapper {
      * @return 影响行数
      */
     @Insert("INSERT INTO hedge_orders(hedge_order_id, exchange_order_id, original_trade_id, customer_id, " +
-            "symbol, side, type, qty, price, filled_qty, avg_price, status, created_at, updated_at) " +
+            "symbol, side, type, qty, price, filled_qty, avg_price, status, is_batched, batch_item_count, " +
+            "created_at, updated_at) " +
             "VALUES(#{hedgeOrderId}, #{exchangeOrderId}, #{originalTradeId}, #{customerId}, " +
             "#{symbol}, #{side}, #{type}, #{qty}, #{price}, #{filledQty}, #{avgPrice}, #{status}, " +
-            "#{createdAt}, #{updatedAt})")
+            "#{isBatched}, #{batchItemCount}, #{createdAt}, #{updatedAt})")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(HedgeOrder order);
 

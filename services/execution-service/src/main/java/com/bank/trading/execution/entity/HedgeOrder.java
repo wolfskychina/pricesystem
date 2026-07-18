@@ -47,10 +47,19 @@ public class HedgeOrder {
     private BigDecimal avgPrice;
     /** 订单状态（NEW/ACCEPTED/FILLED/REJECTED） */
     private String status;
+    /** 是否为聚合对冲单（1=是，0=否，即单笔直接对冲） */
+    private Integer isBatched;
+    /** 聚合子项数量（仅 isBatched=1 时有意义） */
+    private Integer batchItemCount;
     /** 创建时间（毫秒时间戳） */
     private Long createdAt;
     /** 更新时间（毫秒时间戳） */
     private Long updatedAt;
+
+    public Integer getIsBatched() { return isBatched; }
+    public void setIsBatched(Integer isBatched) { this.isBatched = isBatched; }
+    public Integer getBatchItemCount() { return batchItemCount; }
+    public void setBatchItemCount(Integer batchItemCount) { this.batchItemCount = batchItemCount; }
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }

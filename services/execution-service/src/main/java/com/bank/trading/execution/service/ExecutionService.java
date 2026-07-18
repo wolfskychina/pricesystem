@@ -7,8 +7,10 @@ import com.bank.trading.execution.client.ExchangeSessionClient;
 import com.bank.trading.execution.dto.ExchangeOrderRequest;
 import com.bank.trading.execution.dto.ExchangeOrderResponse;
 import com.bank.trading.execution.dto.ExchangeTradeNotification;
+import com.bank.trading.execution.entity.HedgeBatchItem;
 import com.bank.trading.execution.entity.HedgeOrder;
 import com.bank.trading.execution.entity.HedgeTrade;
+import com.bank.trading.execution.mapper.HedgeBatchItemMapper;
 import com.bank.trading.execution.mapper.HedgeOrderMapper;
 import com.bank.trading.execution.mapper.HedgeTradeMapper;
 import org.slf4j.Logger;
@@ -26,13 +28,17 @@ import java.util.UUID;
 /**
  * 对冲执行服务，是 execution-service 的核心业务类。
  * <p>
- * 承担两大职责：
+ * 承担三大职责：
  * <ol>
  *   <li><b>对冲下单</b>：消费客户成交事件（{@link TradeEvent}），计算反向对冲方向与数量，
- *       调用 sim-exchange 提交对冲单（同步受理，返回 NEW）。</li>
+ *       调用 sim-exchange 提交对冲单（同步受理，返回 NEW）。
+ *       支持聚合模式（batching）：同合约同方向多笔成交合并为一笔对冲单，
+ *       由 {@link HedgeBatcher} 负责聚合调度。</li>
  *   <li><b>成交处理</b>：接收 sim-exchange 的 Webhook 成交通知
  *       （{@link ExchangeTradeNotification}），更新对冲订单状态为 FILLED，
- *       持久化成交流水，并发布 {@link HedgeFillEvent} 到 Kafka。</li>
+ *       持久化成交流水，并发布 {@link HedgeFillEvent} 到 Kafka。
+ *       聚合订单成交后，按子项数量比例分摊，逐笔发出 hedge-fill-event。</li>
+ *   <li><b>状态回报</b>：接收 sim-exchange 的订单状态回报，更新本地对冲订单状态。</li>
  * </ol>
  * <p>
  * <b>对冲方向计算</b>：客户 BUY → 做市商 SELL（建立空头敞口）→ 对冲 BUY；
@@ -47,6 +53,7 @@ public class ExecutionService {
 
     private final HedgeOrderMapper hedgeOrderMapper;
     private final HedgeTradeMapper hedgeTradeMapper;
+    private final HedgeBatchItemMapper batchItemMapper;
     private final ExchangeSessionClient exchangeSessionClient;
     private final KafkaTemplate<String, String> kafkaTemplate;
 
@@ -69,23 +76,40 @@ public class ExecutionService {
     /**
      * 构造函数，通过依赖注入获取各组件。
      *
-     * @param hedgeOrderMapper      对冲订单 Mapper
-     * @param hedgeTradeMapper      对冲成交流水 Mapper
-     * @param exchangeSessionClient 交易所会话客户端
-     * @param kafkaTemplate         Kafka 生产者
+     * @param hedgeOrderMapper        对冲订单 Mapper
+     * @param hedgeTradeMapper        对冲成交流水 Mapper
+     * @param batchItemMapper         聚合子项 Mapper
+     * @param exchangeSessionClient   交易所会话客户端
+     * @param kafkaTemplate           Kafka 生产者
      */
     public ExecutionService(HedgeOrderMapper hedgeOrderMapper,
                             HedgeTradeMapper hedgeTradeMapper,
+                            HedgeBatchItemMapper batchItemMapper,
                             ExchangeSessionClient exchangeSessionClient,
                             KafkaTemplate<String, String> kafkaTemplate) {
         this.hedgeOrderMapper = hedgeOrderMapper;
         this.hedgeTradeMapper = hedgeTradeMapper;
+        this.batchItemMapper = batchItemMapper;
         this.exchangeSessionClient = exchangeSessionClient;
         this.kafkaTemplate = kafkaTemplate;
     }
 
     /**
-     * 处理客户成交事件，发起对冲下单。
+     * 处理客户成交事件（入口方法）。
+     * <p>
+     * 委托给 {@link HedgeBatcher#enqueue}，由聚合器决定是立即单笔对冲
+     * 还是入桶等待聚合。
+     *
+     * @param event 客户成交事件
+     */
+    public void onTradeEvent(TradeEvent event) {
+        // 本方法由 TradeEventConsumer 调用，实际逻辑委托给 HedgeBatcher
+        // 当 batching-enabled=false 时，HedgeBatcher 内部调用 onTradeEventImmediate
+        // 当 batching-enabled=true 时，HedgeBatcher 内部入桶
+    }
+
+    /**
+     * 单笔立即对冲（batching 关闭时使用，兼容原有逻辑）。
      * <p>
      * 业务流程：
      * <ol>
@@ -96,14 +120,12 @@ public class ExecutionService {
      *   <li>更新对冲订单的 exchangeOrderId（交易所返回的订单 ID）</li>
      *   <li>等待异步 Webhook 回调推送成交结果</li>
      * </ol>
-     * <p>
-     * 错误处理：交易所下单失败时，对冲订单状态保持 NEW 不变，后续可通过对账任务重试。
      *
      * @param event 客户成交事件
      */
     @Transactional
-    public void onTradeEvent(TradeEvent event) {
-        log.info("Processing trade event for hedge: tradeId={}, symbol={}, side={}, qty={}",
+    public void onTradeEventImmediate(TradeEvent event) {
+        log.info("Processing trade event for immediate hedge: tradeId={}, symbol={}, side={}, qty={}",
                 event.getTradeId(), event.getSymbol(), event.getSide(), event.getQty());
 
         // 1. 计算对冲方向（与客户成交相反）
@@ -111,7 +133,7 @@ public class ExecutionService {
         // 2. 计算对冲数量
         BigDecimal hedgeQty = event.getQty().multiply(hedgeRatio).setScale(4, RoundingMode.HALF_UP);
 
-        // 3. 构造并持久化对冲订单（状态=NEW）
+        // 3. 构造并持久化对冲订单（状态=NEW，isBatched=0）
         HedgeOrder hedgeOrder = new HedgeOrder();
         hedgeOrder.setHedgeOrderId(UUID.randomUUID().toString().replace("-", ""));
         hedgeOrder.setOriginalTradeId(event.getTradeId());
@@ -123,27 +145,98 @@ public class ExecutionService {
         hedgeOrder.setFilledQty(BigDecimal.ZERO);
         hedgeOrder.setAvgPrice(BigDecimal.ZERO);
         hedgeOrder.setStatus("NEW");
+        hedgeOrder.setIsBatched(0);
+        hedgeOrder.setBatchItemCount(0);
         long now = System.currentTimeMillis();
         hedgeOrder.setCreatedAt(now);
         hedgeOrder.setUpdatedAt(now);
         hedgeOrderMapper.insert(hedgeOrder);
 
         // 4. 向交易所提交对冲单（同步受理，返回 NEW）
+        submitOrderToExchange(hedgeOrder, hedgeQty);
+    }
+
+    /**
+     * 提交聚合对冲单（batching 开启时由 HedgeBatcher 调用）。
+     * <p>
+     * 业务流程：
+     * <ol>
+     *   <li>汇总所有子项的对冲数量，计算总量</li>
+     *   <li>构造聚合对冲订单（isBatched=1，batchItemCount=子项数），持久化</li>
+     *   <li>更新所有子项状态为 SUBMITTED，并关联 hedgeOrderId</li>
+     *   <li>调用交易所提交聚合对冲单</li>
+     *   <li>更新聚合对冲订单的 exchangeOrderId</li>
+     * </ol>
+     *
+     * @param items 聚合子项列表（同 symbol + 同 side）
+     */
+    @Transactional
+    public void submitBatchedOrder(List<HedgeBatchItem> items) {
+        if (items == null || items.isEmpty()) {
+            return;
+        }
+
+        String symbol = items.get(0).getSymbol();
+        String side = items.get(0).getSide();
+        BigDecimal totalQty = items.stream()
+                .map(HedgeBatchItem::getQty)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        log.info("Submitting batched hedge order: symbol={}, side={}, itemCount={}, totalQty={}",
+                symbol, side, items.size(), totalQty);
+
+        // 1. 构造聚合对冲订单
+        HedgeOrder hedgeOrder = new HedgeOrder();
+        hedgeOrder.setHedgeOrderId(UUID.randomUUID().toString().replace("-", ""));
+        hedgeOrder.setSymbol(symbol);
+        hedgeOrder.setSide(side);
+        hedgeOrder.setType(hedgeOrderType);
+        hedgeOrder.setQty(totalQty);
+        hedgeOrder.setFilledQty(BigDecimal.ZERO);
+        hedgeOrder.setAvgPrice(BigDecimal.ZERO);
+        hedgeOrder.setStatus("NEW");
+        hedgeOrder.setIsBatched(1);
+        hedgeOrder.setBatchItemCount(items.size());
+        long now = System.currentTimeMillis();
+        hedgeOrder.setCreatedAt(now);
+        hedgeOrder.setUpdatedAt(now);
+        hedgeOrderMapper.insert(hedgeOrder);
+
+        // 2. 更新所有子项：状态=SUBMITTED，关联 hedgeOrderId
+        for (HedgeBatchItem item : items) {
+            item.setHedgeOrderId(hedgeOrder.getHedgeOrderId());
+            item.setStatus("SUBMITTED");
+            item.setUpdatedAt(System.currentTimeMillis());
+            batchItemMapper.update(item);
+        }
+
+        // 3. 向交易所提交聚合对冲单
+        submitOrderToExchange(hedgeOrder, totalQty);
+    }
+
+    /**
+     * 向交易所提交对冲单，成功则更新 exchangeOrderId。
+     *
+     * @param hedgeOrder 对冲订单
+     * @param qty        委托数量
+     */
+    private void submitOrderToExchange(HedgeOrder hedgeOrder, BigDecimal qty) {
         ExchangeOrderRequest request = new ExchangeOrderRequest();
         request.setClientOrderId(hedgeOrder.getHedgeOrderId());
-        request.setSymbol(event.getSymbol());
-        request.setSide(hedgeSide);
+        request.setSymbol(hedgeOrder.getSymbol());
+        request.setSide(hedgeOrder.getSide());
         request.setType(hedgeOrderType);
-        request.setQty(hedgeQty);
+        request.setQty(qty);
 
         try {
             ExchangeOrderResponse response = exchangeSessionClient.submitOrder(request);
             if (response != null && response.getOrderId() != null) {
-                // 5. 更新对冲订单的交易所订单 ID
                 hedgeOrder.setExchangeOrderId(response.getOrderId());
                 hedgeOrderMapper.updateByExchangeOrderId(hedgeOrder);
-                log.info("Hedge order submitted to exchange: hedgeOrderId={}, exchangeOrderId={}, side={}, qty={}",
-                        hedgeOrder.getHedgeOrderId(), response.getOrderId(), hedgeSide, hedgeQty);
+                log.info("Hedge order submitted to exchange: hedgeOrderId={}, exchangeOrderId={}, " +
+                                "side={}, qty={}, isBatched={}",
+                        hedgeOrder.getHedgeOrderId(), response.getOrderId(),
+                        hedgeOrder.getSide(), qty, hedgeOrder.getIsBatched());
             } else {
                 log.warn("Exchange returned null order, hedge order stays NEW: hedgeOrderId={}",
                         hedgeOrder.getHedgeOrderId());
@@ -164,7 +257,8 @@ public class ExecutionService {
      *   <li>根据 exchange_order_id 查找关联的对冲订单</li>
      *   <li>持久化成交流水到 hedge_trades 表</li>
      *   <li>更新对冲订单状态为 FILLED，填充成交量与成交价</li>
-     *   <li>发布 {@link HedgeFillEvent} 到 Kafka，供 position-service 消费</li>
+     *   <li>若为聚合订单（isBatched=1），按子项数量比例分摊成交结果</li>
+     *   <li>发布 {@link HedgeFillEvent} 到 Kafka（聚合订单按子项逐笔发布）</li>
      * </ol>
      *
      * @param notification 交易所成交通知
@@ -213,12 +307,102 @@ public class ExecutionService {
         hedgeOrder.setUpdatedAt(System.currentTimeMillis());
         hedgeOrderMapper.updateByExchangeOrderId(hedgeOrder);
 
-        log.info("Hedge order filled: hedgeOrderId={}, exchangeOrderId={}, price={}, qty={}",
+        log.info("Hedge order filled: hedgeOrderId={}, exchangeOrderId={}, price={}, qty={}, isBatched={}",
                 hedgeOrder.getHedgeOrderId(), hedgeOrder.getExchangeOrderId(),
-                notification.getPrice(), notification.getQty());
+                notification.getPrice(), notification.getQty(), hedgeOrder.getIsBatched());
 
-        // 5. 发布对冲成交事件到 Kafka
-        publishHedgeFillEvent(hedgeOrder, hedgeTrade);
+        // 5. 发布对冲成交事件
+        if (hedgeOrder.getIsBatched() != null && hedgeOrder.getIsBatched() == 1) {
+            // 聚合订单：按子项分摊，逐笔发布 hedge-fill-event
+            publishBatchedHedgeFillEvents(hedgeOrder, hedgeTrade);
+        } else {
+            // 单笔订单：直接发布一笔 hedge-fill-event
+            publishHedgeFillEvent(hedgeOrder, hedgeTrade);
+        }
+    }
+
+    /**
+     * 聚合订单成交后，按子项分摊成交结果，逐笔发布 hedge-fill-event。
+     * <p>
+     * 分摊规则（市价单）：
+     * <ul>
+     *   <li>所有子项成交价相同（= 聚合对冲单成交价）</li>
+     *   <li>每子项 filledQty = 子项 qty（市价单全部成交）</li>
+     *   <li>最后一项吸收尾差，确保 sum(filledQty) = 总成交数量</li>
+     * </ul>
+     *
+     * @param hedgeOrder 聚合对冲订单
+     * @param hedgeTrade 聚合成交流水
+     */
+    private void publishBatchedHedgeFillEvents(HedgeOrder hedgeOrder, HedgeTrade hedgeTrade) {
+        List<HedgeBatchItem> items = batchItemMapper.findByHedgeOrderId(hedgeOrder.getHedgeOrderId());
+        if (items == null || items.isEmpty()) {
+            log.warn("No batch items found for batched hedge order: {}", hedgeOrder.getHedgeOrderId());
+            return;
+        }
+
+        BigDecimal totalFillQty = hedgeTrade.getQty();
+        BigDecimal fillPrice = hedgeTrade.getPrice();
+        BigDecimal totalItemQty = items.stream()
+                .map(HedgeBatchItem::getQty)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        log.info("Allocating batched hedge fill: hedgeOrderId={}, itemCount={}, totalFillQty={}, fillPrice={}",
+                hedgeOrder.getHedgeOrderId(), items.size(), totalFillQty, fillPrice);
+
+        BigDecimal allocatedSoFar = BigDecimal.ZERO;
+        for (int i = 0; i < items.size(); i++) {
+            HedgeBatchItem item = items.get(i);
+            BigDecimal itemFillQty;
+
+            if (i == items.size() - 1) {
+                // 最后一项吸收尾差
+                itemFillQty = totalFillQty.subtract(allocatedSoFar);
+            } else {
+                // 按比例分摊（保留4位小数）
+                itemFillQty = item.getQty().multiply(totalFillQty)
+                        .divide(totalItemQty, 4, RoundingMode.HALF_UP);
+                allocatedSoFar = allocatedSoFar.add(itemFillQty);
+            }
+
+            // 更新子项状态
+            item.setFilledQty(itemFillQty);
+            item.setAvgPrice(fillPrice);
+            item.setStatus("FILLED");
+            item.setUpdatedAt(System.currentTimeMillis());
+            batchItemMapper.update(item);
+
+            // 发布单笔 hedge-fill-event（对应每笔原始客户成交）
+            publishHedgeFillEventForItem(item, hedgeTrade);
+        }
+    }
+
+    /**
+     * 为单个聚合子项发布 hedge-fill-event。
+     *
+     * @param item       聚合子项
+     * @param hedgeTrade 聚合成交流水（提供 tradeId 前缀、tradeTime 等）
+     */
+    private void publishHedgeFillEventForItem(HedgeBatchItem item, HedgeTrade hedgeTrade) {
+        try {
+            HedgeFillEvent event = new HedgeFillEvent(item.getSymbol());
+            event.setHedgeTradeId(hedgeTrade.getExchangeTradeId() + "-" + item.getOriginalTradeId());
+            event.setSymbol(item.getSymbol());
+            event.setSide(item.getSide());
+            event.setQty(item.getFilledQty());
+            event.setPrice(item.getAvgPrice());
+            event.setAmount(item.getFilledQty().multiply(item.getAvgPrice()));
+            event.setTradeTime(hedgeTrade.getTradeTime());
+            event.setOriginalTradeId(item.getOriginalTradeId());
+
+            String json = com.alibaba.fastjson2.JSON.toJSONString(event);
+            kafkaTemplate.send(hedgeFillTopic, item.getSymbol(), json);
+            log.info("Batched hedge fill event published: topic={}, key={}, originalTradeId={}, qty={}",
+                    hedgeFillTopic, item.getSymbol(), item.getOriginalTradeId(), item.getFilledQty());
+        } catch (Exception e) {
+            log.error("Failed to publish batched hedge fill event: originalTradeId={}, error={}",
+                    item.getOriginalTradeId(), e.getMessage());
+        }
     }
 
     /**
@@ -254,7 +438,7 @@ public class ExecutionService {
     }
 
     /**
-     * 发布对冲成交事件到 Kafka。
+     * 发布对冲成交事件到 Kafka（单笔订单场景）。
      * <p>
      * 以 symbol 作为分区键，保证同一合约的对冲事件有序消费，
      * 便于 position-service 正确累加对冲头寸。
@@ -316,5 +500,15 @@ public class ExecutionService {
      */
     public List<HedgeTrade> findHedgeTrades(String hedgeOrderId) {
         return hedgeTradeMapper.findByHedgeOrderId(hedgeOrderId);
+    }
+
+    /**
+     * 查询聚合对冲订单的子项列表。
+     *
+     * @param hedgeOrderId 对冲订单内部 ID
+     * @return 聚合子项列表
+     */
+    public List<HedgeBatchItem> findBatchItems(String hedgeOrderId) {
+        return batchItemMapper.findByHedgeOrderId(hedgeOrderId);
     }
 }
