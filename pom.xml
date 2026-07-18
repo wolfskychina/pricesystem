@@ -47,7 +47,9 @@
         <module>services/position-service</module>
         <module>services/account-service</module>
         <module>services/outbox-relay-service</module>
+        <module>services/gateway</module>
         <module>sim/sim-exchange</module>
+        <module>sim/sim-client</module>
         <module>tests/integration-tests</module>
     </modules>
 

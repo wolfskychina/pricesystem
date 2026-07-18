@@ -1,0 +1,15 @@
+server:
+  port: 8090
+
+spring:
+  application:
+    name: sim-client
+
+sim-client:
+  # 默认下单目标：通过 gateway 走 /api/orders（gateway 会路由到 oms-service）
+  # 联调时可直接指向 oms-service:8084/orders 跳过 gateway
+  target-orders-url: http://localhost:8080/api/orders
+
+logging:
+  level:
+    com.bank.trading.simclient: INFO
