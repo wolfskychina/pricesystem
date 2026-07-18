@@ -68,15 +68,15 @@ class ExecutionServiceTest {
     // ==================== 单笔立即对冲测试 ====================
 
     @Test
-    @DisplayName("客户买入成交 → 对冲卖出方向")
-    void onTradeEventImmediate_customerBuy_hedgeSell() {
+    @DisplayName("客户买入成交 → 对冲买入方向")
+    void onTradeEventImmediate_customerBuy_hedgeBuy() {
         TradeEvent event = buildTradeEvent("T001", "AU2406", "BUY", new BigDecimal("10"));
 
         executionService.onTradeEventImmediate(event);
 
         assertEquals(1, hedgeOrderMapper.orders.size());
         HedgeOrder hedgeOrder = hedgeOrderMapper.orders.get(0);
-        assertEquals("SELL", hedgeOrder.getSide(), "客户 BUY 应触发对冲 SELL");
+        assertEquals("BUY", hedgeOrder.getSide(), "客户 BUY 应触发对冲 BUY");
         assertEquals("AU2406", hedgeOrder.getSymbol());
         assertDecimalEquals(new BigDecimal("10.0000"), hedgeOrder.getQty());
         assertEquals("NEW", hedgeOrder.getStatus());
@@ -85,14 +85,14 @@ class ExecutionServiceTest {
     }
 
     @Test
-    @DisplayName("客户卖出成交 → 对冲买入方向")
-    void onTradeEventImmediate_customerSell_hedgeBuy() {
+    @DisplayName("客户卖出成交 → 对冲卖出方向")
+    void onTradeEventImmediate_customerSell_hedgeSell() {
         TradeEvent event = buildTradeEvent("T002", "AU2406", "SELL", new BigDecimal("5"));
 
         executionService.onTradeEventImmediate(event);
 
         HedgeOrder hedgeOrder = hedgeOrderMapper.orders.get(0);
-        assertEquals("BUY", hedgeOrder.getSide(), "客户 SELL 应触发对冲 BUY");
+        assertEquals("SELL", hedgeOrder.getSide(), "客户 SELL 应触发对冲 SELL");
     }
 
     @Test
@@ -142,7 +142,7 @@ class ExecutionServiceTest {
         ExchangeOrderRequest submitted = exchangeSessionClient.lastSubmittedRequest;
         assertNotNull(submitted);
         assertEquals("AG2406", submitted.getSymbol());
-        assertEquals("BUY", submitted.getSide(), "客户 SELL → 对冲 BUY");
+        assertEquals("SELL", submitted.getSide(), "客户 SELL → 对冲 SELL");
         assertEquals("MARKET", submitted.getType());
         assertDecimalEquals(new BigDecimal("20.0000"), submitted.getQty());
     }

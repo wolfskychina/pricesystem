@@ -33,7 +33,7 @@ public class HedgeOrder {
     private String customerId;
     /** 合约代码 */
     private String symbol;
-    /** 对冲方向（与客户成交相反：客户 BUY → 对冲 SELL，客户 SELL → 对冲 BUY） */
+    /** 对冲方向（与客户成交同向：客户 BUY → 对冲 BUY，客户 SELL → 对冲 SELL） */
     private String side;
     /** 订单类型（MARKET/LIMIT） */
     private String type;

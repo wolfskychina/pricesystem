@@ -14,7 +14,7 @@ public class ExchangeOrderRequest {
     private String clientOrderId;
     /** 合约代码 */
     private String symbol;
-    /** 订单方向（BUY/SELL），对冲方向与客户成交相反 */
+    /** 订单方向（BUY/SELL），对冲方向与客户成交同向 */
     private String side;
     /** 订单类型（MARKET/LIMIT） */
     private String type;

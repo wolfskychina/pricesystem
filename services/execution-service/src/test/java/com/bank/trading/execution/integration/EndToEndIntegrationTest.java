@@ -134,11 +134,11 @@ class EndToEndIntegrationTest {
         hedgeBatcher.enqueue(buildTradeEvent("T-E2E-3", "AU2406", "BUY", new BigDecimal("2")));
 
         // 验证入桶成功
-        assertEquals(3, hedgeBatcher.getBucketSize("AU2406", "SELL"), "3笔应入同一桶（对冲SELL）");
+        assertEquals(3, hedgeBatcher.getBucketSize("AU2406", "BUY"), "3笔应入同一桶（对冲BUY）");
         assertEquals(0, hedgeOrderMapper.orders.size(), "入桶阶段不应创建对冲订单");
 
         // 2. 手动触发出桶，提交聚合对冲单
-        hedgeBatcher.flushBucket("AU2406:SELL");
+        hedgeBatcher.flushBucket("AU2406:BUY");
 
         // 3. 验证聚合对冲订单已提交到交易所（同步受理阶段）
         assertEquals(1, hedgeOrderMapper.orders.size(), "出桶应创建1笔聚合对冲订单");
@@ -146,7 +146,7 @@ class EndToEndIntegrationTest {
         assertEquals(1, batchedOrder.getIsBatched(), "应为聚合订单");
         assertEquals(3, batchedOrder.getBatchItemCount(), "应包含3个子项");
         assertDecimalEquals(new BigDecimal("10.0000"), batchedOrder.getQty(), "总量=5+3+2=10");
-        assertEquals("SELL", batchedOrder.getSide(), "客户BUY→对冲SELL");
+        assertEquals("BUY", batchedOrder.getSide(), "客户BUY→对冲BUY");
         assertEquals("NEW", batchedOrder.getStatus(), "同步受理后状态为NEW");
         assertNotNull(batchedOrder.getExchangeOrderId(), "应有交易所订单ID");
 
@@ -171,7 +171,7 @@ class EndToEndIntegrationTest {
         // 6. 验证 sim-exchange 的成交流水
         List<TradeFill> simFills = matchingEngine.getTradeFills();
         assertEquals(1, simFills.size(), "sim-exchange 应有1条成交流水");
-        assertEquals("SELL", simFills.get(0).getSide(), "对冲单方向为SELL");
+        assertEquals("BUY", simFills.get(0).getSide(), "对冲单方向为BUY");
 
         // 7. 验证 execution-service 的对冲成交流水
         assertEquals(1, hedgeTradeMapper.trades.size(), "应有1条对冲成交流水");
@@ -217,7 +217,7 @@ class EndToEndIntegrationTest {
         assertEquals(1, hedgeOrderMapper.orders.size(), "应创建1笔对冲订单");
         HedgeOrder order = hedgeOrderMapper.orders.get(0);
         assertEquals(0, order.getIsBatched(), "非聚合订单");
-        assertEquals("BUY", order.getSide(), "客户SELL→对冲BUY");
+        assertEquals("SELL", order.getSide(), "客户SELL→对冲SELL");
 
         // 等待异步撮合
         awaitOrderFilledAndEvents(order.getHedgeOrderId(), 1, 2000);
@@ -259,12 +259,12 @@ class EndToEndIntegrationTest {
         hedgeBatcher.enqueue(buildTradeEvent("T-SELL", "AU2406", "SELL", new BigDecimal("3")));
 
         // 验证分桶
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "SELL"), "BUY客户→SELL对冲桶");
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "BUY"), "SELL客户→BUY对冲桶");
+        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "BUY"), "BUY客户→BUY对冲桶");
+        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "SELL"), "SELL客户→SELL对冲桶");
 
         // 分别出桶
-        hedgeBatcher.flushBucket("AU2406:SELL");
         hedgeBatcher.flushBucket("AU2406:BUY");
+        hedgeBatcher.flushBucket("AU2406:SELL");
 
         assertEquals(2, hedgeOrderMapper.orders.size(), "应创建2笔对冲订单（不同方向）");
         long sellCount = hedgeOrderMapper.orders.stream()

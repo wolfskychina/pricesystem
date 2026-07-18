@@ -79,7 +79,7 @@ class HedgeBatcherTest {
         assertEquals(1, hedgeOrderMapper.orders.size(), "应创建1笔对冲订单");
         assertEquals(0, batchItemMapper.items.size(), "batching关闭时不应创建聚合子项");
         HedgeOrder order = hedgeOrderMapper.orders.get(0);
-        assertEquals("SELL", order.getSide(), "客户BUY→对冲SELL");
+        assertEquals("BUY", order.getSide(), "客户BUY→对冲BUY");
         assertEquals(0, order.getIsBatched(), "isBatched应为0（单笔）");
     }
 
@@ -92,8 +92,8 @@ class HedgeBatcherTest {
 
         assertEquals(1, batchItemMapper.items.size(), "应创建1条聚合子项");
         assertEquals(0, hedgeOrderMapper.orders.size(), "入桶时不应创建对冲订单");
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "SELL"),
-                "桶内应有1项（客户BUY→对冲SELL）");
+        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "BUY"),
+                "桶内应有1项（客户BUY→对冲BUY）");
     }
 
     @Test
@@ -102,7 +102,7 @@ class HedgeBatcherTest {
         hedgeBatcher.enqueue(buildTradeEvent("T1", "AU2406", "BUY", new BigDecimal("5")));
         hedgeBatcher.enqueue(buildTradeEvent("T2", "AU2406", "BUY", new BigDecimal("3")));
 
-        assertEquals(2, hedgeBatcher.getBucketSize("AU2406", "SELL"),
+        assertEquals(2, hedgeBatcher.getBucketSize("AU2406", "BUY"),
                 "同方向应合并到同一桶");
         assertEquals(2, batchItemMapper.items.size());
     }
@@ -113,8 +113,8 @@ class HedgeBatcherTest {
         hedgeBatcher.enqueue(buildTradeEvent("T1", "AU2406", "BUY", new BigDecimal("5")));
         hedgeBatcher.enqueue(buildTradeEvent("T2", "AU2406", "SELL", new BigDecimal("3")));
 
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "SELL"), "BUY客户→SELL对冲桶");
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "BUY"), "SELL客户→BUY对冲桶");
+        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "BUY"), "BUY客户→BUY对冲桶");
+        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "SELL"), "SELL客户→SELL对冲桶");
         assertEquals(2, hedgeBatcher.getActiveBucketCount(), "应有2个活跃桶");
     }
 
@@ -124,8 +124,8 @@ class HedgeBatcherTest {
         hedgeBatcher.enqueue(buildTradeEvent("T1", "AU2406", "BUY", new BigDecimal("5")));
         hedgeBatcher.enqueue(buildTradeEvent("T2", "AG2406", "BUY", new BigDecimal("3")));
 
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "SELL"));
-        assertEquals(1, hedgeBatcher.getBucketSize("AG2406", "SELL"));
+        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "BUY"));
+        assertEquals(1, hedgeBatcher.getBucketSize("AG2406", "BUY"));
         assertEquals(2, hedgeBatcher.getActiveBucketCount());
     }
 
@@ -142,7 +142,7 @@ class HedgeBatcherTest {
         assertTrue(first, "第一次应成功入桶");
         assertFalse(second, "第二次应因幂等跳过");
         assertEquals(1, batchItemMapper.items.size(), "只应创建1条子项");
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "SELL"), "桶内只有1项");
+        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "BUY"), "桶内只有1项");
     }
 
     // ==================== 数量阈值出桶测试 ====================
@@ -191,16 +191,16 @@ class HedgeBatcherTest {
         hedgeBatcher.enqueue(buildTradeEvent("T2", "AU2406", "BUY", new BigDecimal("3")));
         hedgeBatcher.enqueue(buildTradeEvent("T3", "AU2406", "SELL", new BigDecimal("4")));
 
-        hedgeBatcher.flushBucket("AU2406:SELL");
+        hedgeBatcher.flushBucket("AU2406:BUY");
 
         assertEquals(1, hedgeOrderMapper.orders.size(), "出桶BUY方向应创建1笔订单");
         HedgeOrder order = hedgeOrderMapper.orders.get(0);
-        assertEquals("SELL", order.getSide());
+        assertEquals("BUY", order.getSide());
         assertEquals(2, order.getBatchItemCount());
         assertDecimalEquals(new BigDecimal("8.0000"), order.getQty());
-        assertEquals(0, hedgeBatcher.getBucketSize("AU2406", "SELL"),
+        assertEquals(0, hedgeBatcher.getBucketSize("AU2406", "BUY"),
                 "出桶后桶应清空");
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "BUY"),
+        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "SELL"),
                 "另一方向桶不受影响");
     }
 
@@ -221,7 +221,7 @@ class HedgeBatcherTest {
         assertEquals("PENDING", before.getStatus(), "入桶后状态应为PENDING");
         assertNull(before.getHedgeOrderId(), "PENDING时无hedgeOrderId");
 
-        hedgeBatcher.flushBucket("AG2406:BUY");
+        hedgeBatcher.flushBucket("AG2406:SELL");
 
         HedgeBatchItem after = batchItemMapper.items.get(0);
         assertEquals("SUBMITTED", after.getStatus(), "出桶后状态应为SUBMITTED");

@@ -42,7 +42,7 @@ import java.util.UUID;
  * </ol>
  * <p>
  * <b>对冲方向计算</b>：客户 BUY → 做市商 SELL（建立空头敞口）→ 对冲 BUY；
- * 客户 SELL → 做市商 BUY（建立多头敞口）→ 对冲 SELL。即对冲方向与客户成交<b>相反</b>。
+ * 客户 SELL → 做市商 BUY（建立多头敞口）→ 对冲 SELL。即对冲方向与客户成交<b>同向</b>。
  * <p>
  * <b>对冲数量</b>：客户成交数量 × {@code hedge-ratio}（默认 1.0 = 全额对冲）。
  */
@@ -469,17 +469,16 @@ public class ExecutionService {
     }
 
     /**
-     * 计算对冲方向（与客户成交相反）。
+     * 计算对冲方向（与客户成交同向）。
      * <p>
-     * 客户 BUY → 做市商 SELL → 对冲 BUY（买回平掉空头）
-     * 客户 SELL → 做市商 BUY → 对冲 SELL（卖出平掉多头）
+     * 客户 BUY → 做市商 SELL（建立空头敞口）→ 对冲 BUY（买回平掉空头）
+     * 客户 SELL → 做市商 BUY（建立多头敞口）→ 对冲 SELL（卖出平掉多头）
      *
      * @param customerSide 客户成交方向
      * @return 对冲方向
      */
     private String calculateHedgeSide(String customerSide) {
-        OrderSide side = OrderSide.of(customerSide);
-        return side == OrderSide.BUY ? "SELL" : "BUY";
+        return customerSide;
     }
 
     /**

@@ -185,14 +185,16 @@ public class HedgeBatcher {
     }
 
     /**
-     * 计算对冲方向（与客户成交相反）。
+     * 计算对冲方向（与客户成交同向）。
+     * <p>
+     * 客户 BUY → 做市商 SELL（建立空头敞口）→ 对冲 BUY（买回平掉空头）
+     * 客户 SELL → 做市商 BUY（建立多头敞口）→ 对冲 SELL（卖出平掉多头）
      *
      * @param customerSide 客户成交方向
      * @return 对冲方向
      */
     private String calculateHedgeSide(String customerSide) {
-        OrderSide side = OrderSide.of(customerSide);
-        return side == OrderSide.BUY ? "SELL" : "BUY";
+        return customerSide;
     }
 
     /**
