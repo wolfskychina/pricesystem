@@ -1,0 +1,43 @@
+server:
+  port: 8087
+
+spring:
+  application:
+    name: position-service
+  profiles:
+    active: sqlite
+  datasource:
+    driver-class-name: org.sqlite.JDBC
+    url: jdbc:sqlite:./data/position.db
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: position-service
+      auto-offset-reset: latest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      enable-auto-commit: false
+    producer:
+      acks: all
+      enable-idempotence: true
+      retries: 3
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+mybatis:
+  mapper-locations: classpath:mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+
+position:
+  # 消费的客户成交事件 topic
+  trade-topic: trade-event
+  # 消费的对冲成交事件 topic
+  hedge-fill-topic: hedge-fill-event
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+  instance:
+    prefer-ip-address: true
