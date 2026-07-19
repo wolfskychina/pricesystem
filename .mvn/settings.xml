@@ -3,6 +3,8 @@
           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
           xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
 
+    <localRepository>H:/VS-workspace/pricesystem/.mvn/local-repo</localRepository>
+
     <proxies>
         <proxy>
             <id>http-proxy</id>
@@ -25,9 +27,9 @@
     <mirrors>
         <mirror>
             <id>aliyunmaven</id>
-            <mirrorOf>central</mirrorOf>
+            <mirrorOf>*</mirrorOf>
             <name>阿里云公共仓库</name>
-            <url>https://maven.aliyun.com/repository/central</url>
+            <url>https://maven.aliyun.com/repository/public</url>
         </mirror>
     </mirrors>
 

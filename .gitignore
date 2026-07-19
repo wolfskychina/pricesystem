@@ -15,10 +15,13 @@ dist/
 .project
 .classpath
 .settings/
+.gitignore
 
 # 日志
 *.log
 logs/
+
+.mvn/
 
 # 系统文件
 .DS_Store
@@ -29,4 +32,4 @@ Thumbs.db
 *.db-wal
 *.db-shm
 
-.mvn/
+
