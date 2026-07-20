@@ -51,6 +51,14 @@ public class HedgeOrder {
     private Integer isBatched;
     /** 聚合子项数量（仅 isBatched=1 时有意义） */
     private Integer batchItemCount;
+    /** 重试次数 */
+    private Integer retryCount;
+    /** 下次重试时间 */
+    private Long nextRetryAt;
+    /** 对冲通道（PRIMARY/SECONDARY） */
+    private String hedgeChannel;
+    /** 失败原因 */
+    private String failureReason;
     /** 创建时间（毫秒时间戳） */
     private Long createdAt;
     /** 更新时间（毫秒时间戳） */
@@ -60,6 +68,14 @@ public class HedgeOrder {
     public void setIsBatched(Integer isBatched) { this.isBatched = isBatched; }
     public Integer getBatchItemCount() { return batchItemCount; }
     public void setBatchItemCount(Integer batchItemCount) { this.batchItemCount = batchItemCount; }
+    public Integer getRetryCount() { return retryCount; }
+    public void setRetryCount(Integer retryCount) { this.retryCount = retryCount; }
+    public Long getNextRetryAt() { return nextRetryAt; }
+    public void setNextRetryAt(Long nextRetryAt) { this.nextRetryAt = nextRetryAt; }
+    public String getHedgeChannel() { return hedgeChannel; }
+    public void setHedgeChannel(String hedgeChannel) { this.hedgeChannel = hedgeChannel; }
+    public String getFailureReason() { return failureReason; }
+    public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }

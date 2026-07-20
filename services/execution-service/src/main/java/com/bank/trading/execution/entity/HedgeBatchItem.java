@@ -39,10 +39,19 @@ public class HedgeBatchItem {
     private BigDecimal filledQty;
     /** 分摊后的成交均价 */
     private BigDecimal avgPrice;
+    /** 重试次数 */
+    private Integer retryCount;
+    /** 失败原因 */
+    private String failureReason;
     /** 创建时间（毫秒时间戳） */
     private Long createdAt;
     /** 更新时间（毫秒时间戳） */
     private Long updatedAt;
+
+    public Integer getRetryCount() { return retryCount; }
+    public void setRetryCount(Integer retryCount) { this.retryCount = retryCount; }
+    public String getFailureReason() { return failureReason; }
+    public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }

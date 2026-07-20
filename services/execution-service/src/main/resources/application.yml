@@ -47,6 +47,26 @@ execution:
   batching-enabled: true       # 是否开启对冲聚合（开发环境开启以便验证）
   batching-window-ms: 1000     # 聚合时间窗口（毫秒），开发环境 1s，生产环境建议 200ms
   batching-size-threshold: 50  # 数量阈值（手），单桶累计超此值立即出桶
+  # 对冲失败应对方案配置
+  hedge:
+    capacity-check:
+      enabled: true                    # 是否启用预对冲评估（fail-fast）
+      max-retry-queue-size: 1000       # 最大重试队列大小，超此值拒单
+      max-allowed-exposure-qty: 100    # 最大允许未对冲敞口（手）
+      exchange-health-timeout-ms: 5000 # 交易所健康检查超时
+      health-check-interval-ms: 10000  # 健康检查间隔（毫秒）
+      consecutive-fail-threshold: 3    # 连续失败阈值
+    retry:
+      max-attempts: 6                  # 最大重试次数
+      initial-interval-ms: 1000        # 初始间隔（毫秒）
+      max-interval-ms: 32000           # 最大间隔（毫秒）
+      multiplier: 2.0                  # 退避倍数
+      jitter-ratio: 0.3                # 抖动比例（±30%）
+    auto-unwind:
+      enabled: true                    # 是否启用自动平仓
+      threshold-qty: 100              # 数量阈值（手）
+      threshold-amount: 1000000       # 金额阈值（元）
+      timeout-ms: 120000              # 超时阈值（毫秒）
 
 eureka:
   client:

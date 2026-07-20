@@ -9,11 +9,14 @@ import com.bank.trading.execution.dto.ExchangeOrderRequest;
 import com.bank.trading.execution.dto.ExchangeOrderResponse;
 import com.bank.trading.execution.dto.ExchangeTradeNotification;
 import com.bank.trading.execution.entity.HedgeBatchItem;
+import com.bank.trading.execution.entity.HedgeFailureExposure;
 import com.bank.trading.execution.entity.HedgeOrder;
 import com.bank.trading.execution.entity.HedgeTrade;
 import com.bank.trading.execution.mapper.HedgeBatchItemMapper;
+import com.bank.trading.execution.mapper.HedgeFailureExposureMapper;
 import com.bank.trading.execution.mapper.HedgeOrderMapper;
 import com.bank.trading.execution.mapper.HedgeTradeMapper;
+import com.bank.trading.execution.util.RetryHelper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -55,9 +58,11 @@ public class ExecutionService {
     private final HedgeOrderMapper hedgeOrderMapper;
     private final HedgeTradeMapper hedgeTradeMapper;
     private final HedgeBatchItemMapper batchItemMapper;
+    private final HedgeFailureExposureMapper failureExposureMapper;
     private final ExchangeSessionClient exchangeSessionClient;
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final IdGenerator idGenerator;
+    private final RetryHelper retryHelper;
 
     /** 客户成交事件 topic */
     @Value("${execution.trade-topic:trade-event}")
@@ -81,21 +86,28 @@ public class ExecutionService {
      * @param hedgeOrderMapper        对冲订单 Mapper
      * @param hedgeTradeMapper        对冲成交流水 Mapper
      * @param batchItemMapper         聚合子项 Mapper
+     * @param failureExposureMapper   失败敞口 Mapper
      * @param exchangeSessionClient   交易所会话客户端
      * @param kafkaTemplate           Kafka 生产者
+     * @param idGenerator             分布式 ID 生成器
+     * @param retryHelper             重试工具
      */
     public ExecutionService(HedgeOrderMapper hedgeOrderMapper,
                             HedgeTradeMapper hedgeTradeMapper,
                             HedgeBatchItemMapper batchItemMapper,
+                            HedgeFailureExposureMapper failureExposureMapper,
                             ExchangeSessionClient exchangeSessionClient,
                             KafkaTemplate<String, String> kafkaTemplate,
-                            IdGenerator idGenerator) {
+                            IdGenerator idGenerator,
+                            RetryHelper retryHelper) {
         this.hedgeOrderMapper = hedgeOrderMapper;
         this.hedgeTradeMapper = hedgeTradeMapper;
         this.batchItemMapper = batchItemMapper;
+        this.failureExposureMapper = failureExposureMapper;
         this.exchangeSessionClient = exchangeSessionClient;
         this.kafkaTemplate = kafkaTemplate;
         this.idGenerator = idGenerator;
+        this.retryHelper = retryHelper;
     }
 
     /**
@@ -238,20 +250,85 @@ public class ExecutionService {
             ExchangeOrderResponse response = exchangeSessionClient.submitOrder(request);
             if (response != null && response.getOrderId() != null) {
                 hedgeOrder.setExchangeOrderId(response.getOrderId());
+                hedgeOrder.setStatus("SUBMITTED");
                 hedgeOrderMapper.updateByExchangeOrderId(hedgeOrder);
                 log.info("Hedge order submitted to exchange: hedgeOrderId={}, exchangeOrderId={}, " +
                                 "side={}, qty={}, isBatched={}",
                         hedgeOrder.getHedgeOrderId(), response.getOrderId(),
                         hedgeOrder.getSide(), qty, hedgeOrder.getIsBatched());
             } else {
-                log.warn("Exchange returned null order, hedge order stays NEW: hedgeOrderId={}",
-                        hedgeOrder.getHedgeOrderId());
+                log.warn("Exchange returned null order: hedgeOrderId={}", hedgeOrder.getHedgeOrderId());
+                handleHedgeFailure(hedgeOrder, "Exchange returned null order");
             }
         } catch (Exception e) {
             log.error("Failed to submit hedge order to exchange: hedgeOrderId={}, error={}",
                     hedgeOrder.getHedgeOrderId(), e.getMessage());
-            // 下单失败，订单保持 NEW 状态，等待后续重试或对账
+            handleHedgeFailure(hedgeOrder, e.getMessage());
         }
+    }
+
+    @Transactional
+    public void handleHedgeFailure(HedgeOrder hedgeOrder, String failureReason) {
+        int currentRetryCount = hedgeOrder.getRetryCount() != null ? hedgeOrder.getRetryCount() : 0;
+        
+        if (retryHelper.hasMoreAttempts(currentRetryCount)) {
+            long nextRetryAt = retryHelper.calculateNextRetryTime(currentRetryCount);
+            hedgeOrder.setStatus("RETRYING");
+            hedgeOrder.setRetryCount(currentRetryCount + 1);
+            hedgeOrder.setNextRetryAt(nextRetryAt);
+            hedgeOrder.setFailureReason(failureReason);
+            hedgeOrder.setUpdatedAt(System.currentTimeMillis());
+            hedgeOrderMapper.updateForRetry(hedgeOrder);
+            log.info("Hedge order set to RETRYING: hedgeOrderId={}, retryCount={}, nextRetryAt={}",
+                    hedgeOrder.getHedgeOrderId(), hedgeOrder.getRetryCount(), nextRetryAt);
+
+            createFailureExposure(hedgeOrder);
+        } else {
+            hedgeOrder.setStatus("FAILED");
+            hedgeOrder.setFailureReason(failureReason);
+            hedgeOrder.setUpdatedAt(System.currentTimeMillis());
+            hedgeOrderMapper.updateByExchangeOrderId(hedgeOrder);
+            log.warn("Hedge order FAILED (max retries exceeded): hedgeOrderId={}",
+                    hedgeOrder.getHedgeOrderId());
+        }
+    }
+
+    @Transactional
+    public void retryHedgeOrder(HedgeOrder order) {
+        log.info("Retrying hedge order: hedgeOrderId={}, attempt={}",
+                order.getHedgeOrderId(), order.getRetryCount() + 1);
+
+        order.setStatus("NEW");
+        order.setExchangeOrderId(null);
+        order.setUpdatedAt(System.currentTimeMillis());
+        hedgeOrderMapper.updateByExchangeOrderId(order);
+
+        submitOrderToExchange(order, order.getQty());
+    }
+
+    private void createFailureExposure(HedgeOrder hedgeOrder) {
+        if (hedgeOrder.getIsBatched() != null && hedgeOrder.getIsBatched() == 1) {
+            return;
+        }
+
+        HedgeFailureExposure existing = failureExposureMapper.findByOriginalTradeId(hedgeOrder.getOriginalTradeId());
+        if (existing != null) {
+            return;
+        }
+
+        HedgeFailureExposure exposure = new HedgeFailureExposure();
+        exposure.setId(idGenerator.nextLongId());
+        exposure.setCustomerId(hedgeOrder.getCustomerId());
+        exposure.setSymbol(hedgeOrder.getSymbol());
+        exposure.setSide(hedgeOrder.getSide());
+        exposure.setPendingQty(hedgeOrder.getQty());
+        exposure.setExposureAmount(hedgeOrder.getQty().multiply(BigDecimal.ZERO));
+        exposure.setStatus("PENDING");
+        exposure.setRetryCount(0);
+        exposure.setOriginalTradeId(hedgeOrder.getOriginalTradeId());
+        exposure.setHedgeOrderId(hedgeOrder.getHedgeOrderId());
+        exposure.setCreatedAt(System.currentTimeMillis());
+        failureExposureMapper.insert(exposure);
     }
 
     /**

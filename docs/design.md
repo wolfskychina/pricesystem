@@ -212,12 +212,377 @@ trade-event → HedgeBatcher.enqueue
 - 计算净敞口 = 客户头寸 - 对冲头寸
 - REST: `GET /positions/{customerId}`、`GET /positions/exposure`
 
-### 3.7 account-service（客户账户服务）
+### 3.7 对冲失败应对方案（Hedge Failure Handling）
+
+> **设计原则**：fail-fast，直接拒单（Hedge-First）。客户下单前评估对冲能力，不足则立即拒绝，保证客户端逻辑简单、吞吐量大、无状态。仅在评估通过后才执行成交，从源头避免敞口风险。
+
+> 当预对冲评估通过但后续实际对冲失败时，通过多层防御体系（重试 → 自动平仓 → DLQ）兜底处理，确保最终风险可控。
+
+#### 3.7.1 问题分析
+
+**业务场景**：客户在 OMS 下单 → 风控通过 → OMS 落单（status=FILLED）→ 推送 `trade-event` → execution-service 消费 → 计算对冲单 → **调用交易所失败**
+
+**失败原因分类**：
+- **瞬时网络异常**：TCP 断开、DNS 失败、HTTP 5xx（高频，自动恢复）
+- **交易所/对手方系统异常**：交易所宕机、风控拒绝、限流（中频，需重试）
+- **业务异常**：资金不足、合约停牌、风控拦截（低频，需人工介入）
+- **未知异常**：NPE、超时、序列化错误（低频，需死信兜底）
+
+**风险评估**：客户 BUY 1 手黄金 → 做市商持有空头 1 手，价格反向波动即亏损；额度已扣减但对冲未发出。
+
+#### 3.7.2 多层防御体系
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Layer 1: 预防 - 预对冲评估（Hedge-First）                           │
+│  → 客户下单前评估对冲能力，不足则直接拒单（fail-fast）                │
+├─────────────────────────────────────────────────────────────────────┤
+│  Layer 2: 本地重试 - 指数退避 + 抖动                                │
+│  → 1s/2s/4s/8s/16s/32s，最多 6 次，约 1 分钟                       │
+├─────────────────────────────────────────────────────────────────────┤
+│  Layer 3: 状态机推进 - 定时扫描恢复                                │
+│  → 每 10s 扫描 RETRYING 状态，触发重试；失败敞口超阈值自动平仓       │
+├─────────────────────────────────────────────────────────────────────┤
+│  Layer 4: 兜底对冲 - 多通道（本期预留接口）                           │
+│  → 主通道失败后自动切换备通道                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│  Layer 5: 告警 + 自动平仓 - 风险敞口超阈值                          │
+│  → 失败累计敞口超阈值 → 触发市价反向平仓 + 告警运维                 │
+├─────────────────────────────────────────────────────────────────────┤
+│  Layer 6: 死信队列 - 终极兜底                                       │
+│  → 重试耗尽入 DLQ，补偿任务 + 人工介入                             │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### 3.7.3 对冲订单状态机
+
+```
+              ┌──────────┐
+              │  PENDING │ (入桶/待提交)
+              └─────┬────┘
+                    │ submit to exchange
+        ┌───────────┼─────────────┬──────────────┐
+        ▼           ▼             ▼              ▼
+   ┌─────────┐ ┌─────────┐ ┌──────────┐  ┌──────────────┐
+   │SUBMITTED│ │RETRYING │ │  FAILED  │  │REJECTED      │
+   │已受理   │ │重试中   │ │重试耗尽  │  │业务拒绝      │
+   └────┬────┘ └────┬────┘ └─────┬────┘  └──────┬───────┘
+        │           │            │              │
+        │           │ 成功      │              │
+        ▼           ▼            ▼              ▼
+   ┌──────────────────────────────────────────────────┐
+   │              FILLED（成交，对冲成功）             │
+   └──────────────────────────────────────────────────┘
+                       │
+                       │ 部分成交
+                       ▼
+   ┌──────────────────────────────────────────────────┐
+   │          PARTIAL_FILLED（部分成交）              │
+   └──────────────────────────────────────────────────┘
+
+   任何状态 → 失败累计敞口超阈值 → 触发自动平仓（EMERGENCY_HEDGED）
+```
+
+**状态定义**：
+| 状态 | 说明 | 允许转换 |
+|------|------|----------|
+| PENDING | 入桶待提交，或已创建但未提交 | → SUBMITTED / FAILED |
+| SUBMITTED | 已提交交易所，等待回报 | → RETRYING / FILLED / PARTIAL_FILLED / REJECTED |
+| RETRYING | 提交失败，等待下次重试 | → SUBMITTED / FAILED / EMERGENCY_HEDGED |
+| FILLED | 完全成交 | 终态 |
+| PARTIAL_FILLED | 部分成交 | → FILLED / EMERGENCY_HEDGED |
+| REJECTED | 交易所业务拒绝（资金不足等） | → FAILED / EMERGENCY_HEDGED |
+| FAILED | 重试耗尽或系统异常 | → DLQ / EMERGENCY_HEDGED |
+| EMERGENCY_HEDGED | 自动平仓已执行 | 终态 |
+
+#### 3.7.4 预对冲评估（Hedge-First）
+
+**设计原则**：fail-fast，直接拒单，保证客户端逻辑简单、吞吐量大、无状态。
+
+> **核心思想**：在客户订单成交**之前**评估对冲能力，评估不通过则直接拒绝客户订单（HTTP 409 Conflict）。客户收到明确拒绝后可立即重试或放弃，无需等待异步对冲结果。这是保证系统吞吐量和客户端逻辑简单的关键设计。
+
+**评估维度**：
+
+| 维度 | 评估内容 | 拒单条件 | 恢复方式 |
+|------|----------|----------|----------|
+| **通道健康度** | 交易所可达性、响应时间 | 连续失败 > N 次 或 响应时间 > 阈值 | 自动恢复（定时探针） |
+| **做市商额度** | 可用资金/保证金是否充足 | 可用额度 < 订单预估金额 | 补充资金 |
+| **对冲堆积** | RETRYING 状态对冲单数量 | 重试队列 > max-retry-queue-size | 系统自动处理堆积 |
+| **合约状态** | 合约是否停牌、是否在交易时段 | 合约停牌或非交易时段 | 等待恢复 |
+| **当前敞口** | 已存在的未对冲敞口数量 | 未对冲敞口 > max-allowed-exposure-qty | 等待对冲完成 |
+
+**评估器接口**：
+```java
+public interface HedgeCapacityChecker {
+    /**
+     * 评估对冲能力，不足则抛出异常
+     * @param symbol 合约代码
+     * @param qty 委托数量
+     * @param side 客户成交方向（用于计算对冲方向）
+     * @throws HedgeCapacityException 对冲能力不足时抛出，HTTP 409 Conflict
+     */
+    void checkCapacity(String symbol, BigDecimal qty, String side);
+    
+    /**
+     * 轻量检查（仅检查通道健康度和合约状态，不查额度和敞口）
+     * 用于前端报价前的快速评估，避免浪费风控资源
+     * @throws HedgeCapacityException 评估不通过时抛出
+     */
+    void quickCheck(String symbol);
+    
+    /**
+     * 获取当前评估状态摘要（用于监控）
+     * @return 评估状态摘要
+     */
+    CapacityStatus getCapacityStatus();
+}
+
+public class CapacityStatus {
+    private boolean healthy;           // 整体健康状态
+    private int retryQueueSize;        // 当前重试队列大小
+    private BigDecimal openExposureQty; // 当前未对冲敞口数量
+    private boolean exchangeReachable; // 交易所是否可达
+    private long lastHealthCheckTime;  // 上次健康检查时间
+}
+```
+
+**配置项**：
+```yaml
+execution:
+  hedge:
+    capacity-check:
+      enabled: true                    # 是否启用预对冲评估
+      max-retry-queue-size: 1000       # 最大重试队列大小，超此值拒单
+      max-allowed-exposure-qty: 100    # 最大允许未对冲敞口（手）
+      exchange-health-timeout-ms: 5000 # 交易所健康检查超时
+      health-check-interval-ms: 10000  # 健康检查间隔（毫秒）
+      consecutive-fail-threshold: 3    # 连续失败阈值（超过此值标记不可用）
+```
+
+**集成点**：
+
+```
+客户下单流程（增加预对冲评估）：
+1. 客户 → Gateway → OMS: POST /orders
+2. OMS: 幂等校验（clientOrderId）
+3. OMS → Risk: POST /risk/pre-trade（同步事前风控）
+4. OMS → Execution: POST /execution/hedge-capacity/check（同步预对冲评估）
+   ├─ 评估通过 → 继续
+   └─ 评估失败 → 直接返回 HTTP 409 Conflict，订单状态=REJECTED
+5. OMS: 执行成交（做市商即对手方，订单状态=FILLED）
+6. OMS: 写入 outbox + event_store
+7. 返回客户: 订单已成交
+```
+
+**HTTP 响应示例（拒单）**：
+```json
+{
+  "code": 409,
+  "message": "HEDGE_CAPACITY_INSUFFICIENT",
+  "data": {
+    "reason": "EXCHANGE_UNREACHABLE",
+    "symbol": "AU2406",
+    "retryQueueSize": 1200,
+    "maxRetryQueueSize": 1000,
+    "suggestedRetryAfter": 30000
+  }
+}
+```
+
+**吞吐量保障**：
+- 预对冲评估采用**本地缓存 + 定时刷新**模式，避免每次评估都访问数据库
+- 健康检查结果缓存 10 秒，合约状态缓存 1 分钟
+- 评估逻辑简单快速（O(1)），不涉及复杂计算或外部调用
+- 评估失败直接拒单，避免后续资源消耗（成交、消息投递、对冲下单等）
+
+#### 3.7.5 重试策略
+
+**指数退避 + 抖动**：
+- 初始间隔：1s
+- 最大间隔：32s
+- 倍数：2.0
+- 抖动：±30%
+- 最大重试次数：6 次（约 1 分钟）
+- 总超时：2 分钟
+
+**退避序列**（1s ±30%）：
+```
+1s → 2s → 4s → 8s → 16s → 32s ≈ 63s（含抖动约 80s）
+```
+
+**配置项**：
+```yaml
+execution:
+  hedge:
+    retry:
+      max-attempts: 6              # 最大重试次数
+      initial-interval-ms: 1000     # 初始间隔
+      max-interval-ms: 32000       # 最大间隔
+      multiplier: 2.0              # 倍数
+      jitter-ratio: 0.3            # 抖动比例
+      total-timeout-ms: 120000     # 总超时
+```
+
+#### 3.7.6 失败敞口跟踪
+
+**hedge_failure_exposure 表**：
+```sql
+CREATE TABLE hedge_failure_exposure (
+  id              BIGINT PRIMARY KEY,        -- 分布式 ID（应用层 Snowflake 发号器生成）
+  customer_id     VARCHAR(32) NOT NULL,
+  symbol          VARCHAR(32) NOT NULL,
+  side            VARCHAR(8) NOT NULL,       -- 对冲方向（与客户成交同向）
+  pending_qty     DECIMAL(18,4) NOT NULL,    -- 等待对冲的数量
+  exposure_amount DECIMAL(20,2) NOT NULL,    -- 敞口金额（qty × 当前价格）
+  status          VARCHAR(16) NOT NULL,      -- PENDING/HEDGED/EMERGENCY_CLOSED/EXPIRED
+  retry_count     INT NOT NULL DEFAULT 0,
+  last_retry_at   TIMESTAMP,
+  original_trade_id VARCHAR(64) NOT NULL,    -- 关联客户成交 trade_id
+  hedge_order_id  VARCHAR(64),               -- 关联对冲订单
+  created_at      TIMESTAMP NOT NULL,
+  resolved_at     TIMESTAMP,
+  shard_id        INT NOT NULL
+);
+CREATE INDEX idx_hfe_status ON hedge_failure_exposure(status, created_at);
+CREATE INDEX idx_hfe_symbol ON hedge_failure_exposure(symbol, status);
+```
+
+**状态定义**：
+| 状态 | 说明 |
+|------|------|
+| PENDING | 等待对冲，敞口未消除 |
+| HEDGED | 对冲成功，敞口已消除 |
+| EMERGENCY_CLOSED | 自动平仓执行，敞口已消除 |
+| EXPIRED | 超期未对冲（人工介入超时） |
+
+#### 3.7.7 自动平仓（Auto-Unwind）
+
+**触发条件**（任一满足即触发）：
+1. 单合约失败敞口数量 > `auto-unwind-threshold-qty`（默认 100 手）
+2. 失败敞口金额 > `auto-unwind-threshold-amount`（默认 100 万）
+3. 失败持续时间 > `auto-unwind-timeout`（默认 2 分钟）
+4. 重试次数 > `max-attempts` 且未平仓
+
+**执行流程**：
+1. 在对冲订单同方向（市价）发反向平仓单到交易所
+2. 平仓成功后标记 `EMERGENCY_HEDGED`
+3. 更新 `hedge_failure_exposure.status = EMERGENCY_CLOSED`
+4. 告警运维（日志 + WebSocket 推送）
+5. 写审计日志
+
+**配置项**：
+```yaml
+execution:
+  hedge:
+    auto-unwind:
+      enabled: true                       # 是否启用自动平仓
+      threshold-qty: 100                  # 数量阈值（手）
+      threshold-amount: 1000000           # 金额阈值（元）
+      timeout-ms: 120000                  # 超时阈值（毫秒）
+```
+
+#### 3.7.8 死信队列（DLQ）
+
+**hedge_dlq 表**：
+```sql
+CREATE TABLE hedge_dlq (
+  id              BIGINT PRIMARY KEY,        -- 分布式 ID
+  hedge_order_id  VARCHAR(64) NOT NULL,      -- 关联对冲订单
+  original_trade_id VARCHAR(64) NOT NULL,    -- 关联客户成交
+  customer_id     VARCHAR(32),
+  symbol          VARCHAR(32),
+  side            VARCHAR(8),
+  qty             DECIMAL(18,4),
+  reason          TEXT,                      -- 失败原因
+  retry_count     INT NOT NULL DEFAULT 0,
+  max_retry_count INT NOT NULL DEFAULT 3,    -- 最大补偿重试次数
+  status          VARCHAR(16) NOT NULL,      -- PENDING/RECOVERED/FAILED
+  created_at      TIMESTAMP NOT NULL,
+  recovered_at    TIMESTAMP,
+  shard_id        INT NOT NULL
+);
+CREATE INDEX idx_dlq_status ON hedge_dlq(status, created_at);
+```
+
+**补偿任务**：每 30 秒扫描 DLQ，尝试恢复对冲；补偿重试耗尽后告警人工介入。
+
+#### 3.7.9 状态机推进定时任务
+
+**调度频率**：每 10 秒
+
+**执行逻辑**：
+1. 拉取 RETRYING 状态的对冲订单，检查 `next_retry_at` 是否已到，触发下次重试
+2. 拉取 PENDING/RETRYING 状态，计算失败敞口
+3. 敞口超阈值 → 触发自动平仓
+4. 累计重试 > max-attempts → 标记 FAILED + 入 DLQ
+5. 失败 > auto-unwind-timeout 但未平仓 → 紧急平仓
+
+#### 3.7.10 监控与告警
+
+**REST 接口**：
+```java
+GET  /execution/hedge-orders/{id}            // 查询对冲单状态 + 重试历史
+GET  /execution/hedge-failures               // 当前未平仓的失败敞口列表
+GET  /execution/hedge-failures/summary       // 失败敞口汇总（按 symbol）
+POST /execution/hedge-orders/{id}/retry      // 手动重试
+POST /execution/hedge-orders/{id}/cancel     // 手动撤单/平仓
+GET  /execution/hedge-metrics               // 监控指标
+```
+
+**监控指标**：
+| 指标 | 类型 | 说明 |
+|------|------|------|
+| `hedge_submit_total{result="success\|fail"}` | Counter | 对冲下单次数 |
+| `hedge_retry_count` | Histogram | 单笔对冲的重试次数分布 |
+| `hedge_open_exposure_qty` | Gauge | 当前未对冲敞口数量 |
+| `hedge_open_exposure_amount` | Gauge | 当前未对冲敞口金额 |
+| `hedge_auto_unwind_total` | Counter | 触发自动平仓次数 |
+| `hedge_dlq_size` | Gauge | DLQ 中待处理对冲单数 |
+| `hedge_latency_ms` | Histogram | 对冲下单到成交的延迟 |
+
+#### 3.7.11 与现有模块的整合
+
+| 模块 | 改造点 |
+|------|--------|
+| `hedge_orders` 表 | 新增 status 枚举（RETRYING/FAILED/EMERGENCY_HEDGED）、retry_count、next_retry_at、hedge_channel |
+| `hedge_batch_items` 表 | 新增 hedge_status / retry_count |
+| `ExecutionService` | 状态机 + 重试 + 自动平仓 + DLQ 集成 |
+| `HedgeBatcher` | 预对冲评估集成 |
+| `ReconciliationService` | 新增对冲失败敞口对账维度 |
+| `notify-service` | 新增对冲失败告警推送 |
+| `OutboxService` | 重试机制复用 |
+
+#### 3.7.12 本期实现范围
+
+| 项 | 状态 | 说明 |
+|----|------|------|
+| 预对冲评估（fail-fast） | ✅ 本期实现 | 直接拒单，保证客户端逻辑简单 |
+| 本地重试（指数退避） | ✅ 本期实现 | 最多 6 次，约 1 分钟 |
+| 状态机推进定时任务 | ✅ 本期实现 | 每 10s 扫描 |
+| 失败敞口跟踪表 | ✅ 本期实现 | hedge_failure_exposure |
+| 自动平仓 | ✅ 本期实现 | 超阈值触发 |
+| DLQ 表 + 补偿任务 | ✅ 本期实现 | 终极兜底 |
+| 监控 REST 接口 | ✅ 本期实现 | 查询/手动重试/指标 |
+| 多通道兜底对冲 | ⏸️ 接口预留 | 备通道接口预留，本期不实现 |
+| 客户端撤单/冲正 | ⏸️ 保留扩展点 | 不实现 |
+
+#### 3.7.13 风险与权衡
+
+| 维度 | 优势 | 风险 |
+|------|------|------|
+| fail-fast 预对冲 | 客户端逻辑简单、吞吐量大 | 可能因误判拒单，影响成交率 |
+| 自动平仓 | 立即消除敞口 | 滑点损失、可能误触发 |
+| 状态机推进 | 可追溯、可恢复 | 需要额外的扫描任务，略有资源消耗 |
+| DLQ 兜底 | 极端情况不丢单 | 需人工运维、恢复时间长 |
+
+---
+
+### 3.8 account-service（客户账户服务）
 - 客户主数据、信用额度、保证金
 - 消费 `trade-event` 扣减可用额度
 - REST: CRUD + `GET /accounts/{id}/credit`
 
-### 3.8 refdata-service（基础数据服务）
+### 3.9 refdata-service（基础数据服务）
 - 合约定义（代码、乘数、最小变动价位）
 - 交易所信息、交易日历
 - REST 查询
@@ -928,3 +1293,48 @@ CREATE TABLE hedge_position (
 - 新增 3.9 notify-service / 3.10 reconciliation-service 详细设计
 - 更新八、工程结构：新增 outbox-relay-service、reconciliation-service、tests/integration-tests
 - 更新十二、实施优先级：新增 outbox-relay-service（P2）、reconciliation-service（P3）
+
+### 2026-07-20 — 对冲失败应对方案：Hedge-First 直接拒单策略
+
+**变更原因：**
+- 客户下单后对冲失败会造成做市商单边敞口风险，需要设计完整的应对方案
+- 设计原则：fail-fast，直接拒单，保证客户端逻辑简单、吞吐量大、无状态
+- 采用预对冲评估（Hedge-First）模式，在成交前评估对冲能力，不足则直接拒单
+
+**变更内容：**
+
+1. **新增设计章节**：3.7 对冲失败应对方案（Hedge Failure Handling）
+   - 问题分析：失败原因分类、风险评估
+   - 多层防御体系：预防（预对冲评估）→ 本地重试 → 状态机推进 → 自动平仓 → DLQ
+   - 对冲订单状态机：新增 RETRYING/FAILED/EMERGENCY_HEDGED 状态
+   - 预对冲评估（Hedge-First）：5 维度评估、fail-fast 拒单、吞吐量保障
+   - 重试策略：指数退避 + 抖动，最多 6 次（约 1 分钟）
+   - 失败敞口跟踪：hedge_failure_exposure 表设计
+   - 自动平仓：超阈值触发市价反向平仓
+   - DLQ：死信队列 + 补偿任务
+   - 监控 REST 接口：查询失败敞口/手动重试/监控指标
+
+2. **新增数据库表**：
+   - `hedge_failure_exposure`：失败敞口跟踪表
+   - `hedge_dlq`：死信队列表
+
+3. **修改数据库表**：
+   - `hedge_orders`：新增 retry_count、next_retry_at、hedge_channel 字段
+   - `hedge_batch_items`：新增 retry_count 字段
+
+4. **新增接口与类**：
+   - `HedgeCapacityChecker`：预对冲评估器接口
+   - `HedgeRecoveryScheduler`：状态机推进定时任务
+   - 监控 REST 接口：查询失败敞口、手动重试、手动撤单、监控指标
+
+**设计原则：**
+- **直接拒单**：预对冲评估不通过立即拒绝客户订单（HTTP 409），客户端无需等待异步结果
+- **客户端简单**：收到明确拒绝后可立即重试或放弃，无需处理复杂的异步回调
+- **吞吐量大**：评估采用本地缓存 + 定时刷新，O(1) 复杂度，不阻塞下单流程
+- **风险可控**：多层防御兜底，确保最终风险可控
+
+**影响范围：**
+- execution-service：核心改造，新增预对冲评估、重试、自动平仓、DLQ 能力
+- oms-service：集成预对冲评估调用
+- reconciliation-service：新增对冲失败敞口对账维度
+- 数据库：新增 2 张表，修改 2 张表

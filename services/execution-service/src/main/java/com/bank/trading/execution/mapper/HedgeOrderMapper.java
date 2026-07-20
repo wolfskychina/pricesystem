@@ -21,10 +21,10 @@ public interface HedgeOrderMapper {
      */
     @Insert("INSERT INTO hedge_orders(id, hedge_order_id, exchange_order_id, original_trade_id, customer_id, " +
             "symbol, side, type, qty, price, filled_qty, avg_price, status, is_batched, batch_item_count, " +
-            "created_at, updated_at) " +
+            "retry_count, next_retry_at, hedge_channel, failure_reason, created_at, updated_at) " +
             "VALUES(#{id}, #{hedgeOrderId}, #{exchangeOrderId}, #{originalTradeId}, #{customerId}, " +
             "#{symbol}, #{side}, #{type}, #{qty}, #{price}, #{filledQty}, #{avgPrice}, #{status}, " +
-            "#{isBatched}, #{batchItemCount}, #{createdAt}, #{updatedAt})")
+            "#{isBatched}, #{batchItemCount}, #{retryCount}, #{nextRetryAt}, #{hedgeChannel}, #{failureReason}, #{createdAt}, #{updatedAt})")
     int insert(HedgeOrder order);
 
     /**
@@ -72,4 +72,18 @@ public interface HedgeOrderMapper {
      */
     @Select("SELECT COUNT(*) FROM hedge_orders WHERE status = #{status}")
     int countByStatus(String status);
+
+    @Select("SELECT * FROM hedge_orders WHERE status = 'RETRYING' AND next_retry_at <= #{currentTime}")
+    List<HedgeOrder> findReadyForRetry(long currentTime);
+
+    @Select("SELECT * FROM hedge_orders WHERE status IN ('PENDING', 'RETRYING', 'SUBMITTED')")
+    List<HedgeOrder> findActiveOrders();
+
+    @Update("UPDATE hedge_orders SET status=#{status}, retry_count=#{retryCount}, " +
+            "next_retry_at=#{nextRetryAt}, failure_reason=#{failureReason}, updated_at=#{updatedAt} " +
+            "WHERE hedge_order_id=#{hedgeOrderId}")
+    int updateForRetry(HedgeOrder order);
+
+    @Select("SELECT * FROM hedge_orders WHERE status = 'RETRYING' ORDER BY next_retry_at ASC LIMIT #{limit}")
+    List<HedgeOrder> findRetryingOrders(int limit);
 }
