@@ -119,14 +119,31 @@ public class OrderService {
         BigDecimal executionPrice;
 
         if (OrderType.MARKET.getCode().equals(order.getType())) {
-            executionPrice = priceProvider.getExecutionPrice(order.getSymbol(), order.getSide());
-            if (executionPrice == null) {
+            QuoteDTO quote = priceProvider.getQuote(order.getSymbol());
+            if (quote == null) {
                 order.setStatus(OrderStatus.REJECTED.getCode());
                 order.setRejectReason("No market data available for symbol: " + order.getSymbol());
                 order.setUpdatedAt(LocalDateTime.now());
                 orderMapper.updateByOrderId(order);
                 log.info("Order rejected (no market data): orderId={}", order.getOrderId());
                 return toDTO(order);
+            }
+
+            if (quote.getValidUntil() != null && quote.getValidUntil() < System.currentTimeMillis()) {
+                order.setStatus(OrderStatus.REJECTED.getCode());
+                order.setRejectReason("Quote expired for symbol: " + order.getSymbol()
+                        + ", please request a new quote (RFQ)");
+                order.setUpdatedAt(LocalDateTime.now());
+                orderMapper.updateByOrderId(order);
+                log.info("Order rejected (quote expired): orderId={}, symbol={}, validUntil={}",
+                        order.getOrderId(), order.getSymbol(), quote.getValidUntil());
+                return toDTO(order);
+            }
+
+            if ("BUY".equalsIgnoreCase(order.getSide())) {
+                executionPrice = quote.getCustomerAskPrice();
+            } else {
+                executionPrice = quote.getCustomerBidPrice();
             }
         } else {
             executionPrice = order.getPrice();

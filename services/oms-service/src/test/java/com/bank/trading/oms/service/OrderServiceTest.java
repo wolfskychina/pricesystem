@@ -30,6 +30,7 @@ class OrderServiceTest {
     private MockOutboxService outboxService;
     private MockRiskChecker riskChecker;
     private MockPriceProvider priceProvider;
+    private com.bank.trading.common.core.idgen.IdGenerator idGenerator;
 
     static class InMemoryOrderMapper implements OrderMapper {
         final List<Order> orders = new ArrayList<>();
@@ -158,10 +159,34 @@ class OrderServiceTest {
 
     static class MockPriceProvider implements PriceProvider {
         BigDecimal price = new BigDecimal("520.25");
+        com.bank.trading.common.core.dto.QuoteDTO quote;
 
         @Override
         public BigDecimal getExecutionPrice(String symbol, String side) {
+            if (quote != null) {
+                if ("BUY".equalsIgnoreCase(side)) {
+                    return quote.getCustomerAskPrice();
+                } else {
+                    return quote.getCustomerBidPrice();
+                }
+            }
             return price;
+        }
+
+        @Override
+        public com.bank.trading.common.core.dto.QuoteDTO getQuote(String symbol) {
+            if (quote != null) {
+                return quote;
+            }
+            if (price == null) {
+                return null;
+            }
+            com.bank.trading.common.core.dto.QuoteDTO q = new com.bank.trading.common.core.dto.QuoteDTO();
+            q.setSymbol(symbol);
+            q.setCustomerBidPrice(price);
+            q.setCustomerAskPrice(price);
+            q.setValidUntil(System.currentTimeMillis() + 30000);
+            return q;
         }
     }
 
@@ -173,8 +198,9 @@ class OrderServiceTest {
         outboxService = new MockOutboxService();
         riskChecker = new MockRiskChecker();
         priceProvider = new MockPriceProvider();
+        idGenerator = new com.bank.trading.common.core.idgen.IdGenerator(1, 1);
         orderService = new OrderService(orderMapper, tradeMapper, eventStoreService,
-                outboxService, riskChecker, priceProvider);
+                outboxService, riskChecker, priceProvider, idGenerator);
 
         try {
             java.lang.reflect.Field field = OrderService.class.getDeclaredField("tradeTopic");
@@ -402,5 +428,72 @@ class OrderServiceTest {
         Trade trade = tradeMapper.trades.get(0);
         BigDecimal expectedAmount = BigDecimal.valueOf(10).multiply(new BigDecimal("520.00"));
         assertEquals(0, expectedAmount.compareTo(trade.getAmount()));
+    }
+
+    @Test
+    void createOrder_marketOrder_quoteExpired_shouldReject() {
+        com.bank.trading.common.core.dto.QuoteDTO expiredQuote =
+                new com.bank.trading.common.core.dto.QuoteDTO();
+        expiredQuote.setSymbol("AU2406");
+        expiredQuote.setCustomerBidPrice(new BigDecimal("520.00"));
+        expiredQuote.setCustomerAskPrice(new BigDecimal("520.50"));
+        expiredQuote.setValidUntil(System.currentTimeMillis() - 1000);
+        priceProvider.quote = expiredQuote;
+
+        OrderCreateDTO request = createMarketOrder("C022", "CUST001", "AU2406", "BUY",
+                BigDecimal.valueOf(10));
+
+        OrderDTO result = orderService.createOrder(request);
+
+        assertNotNull(result);
+        assertEquals(OrderStatus.REJECTED.getCode(), result.getStatus());
+        assertTrue(result.getRejectReason().contains("Quote expired"),
+                "Reject reason should mention quote expired");
+        assertTrue(result.getRejectReason().contains("RFQ"),
+                "Reject reason should suggest RFQ");
+        assertEquals(0, tradeMapper.trades.size());
+        assertEquals(0, eventStoreService.appendCount);
+    }
+
+    @Test
+    void createOrder_marketOrder_validQuote_shouldFill() {
+        com.bank.trading.common.core.dto.QuoteDTO validQuote =
+                new com.bank.trading.common.core.dto.QuoteDTO();
+        validQuote.setSymbol("AU2406");
+        validQuote.setCustomerBidPrice(new BigDecimal("520.00"));
+        validQuote.setCustomerAskPrice(new BigDecimal("520.50"));
+        validQuote.setValidUntil(System.currentTimeMillis() + 30000);
+        priceProvider.quote = validQuote;
+
+        OrderCreateDTO request = createMarketOrder("C023", "CUST001", "AU2406", "BUY",
+                BigDecimal.valueOf(10));
+
+        OrderDTO result = orderService.createOrder(request);
+
+        assertNotNull(result);
+        assertEquals(OrderStatus.FILLED.getCode(), result.getStatus());
+        assertEquals(0, new BigDecimal("520.50").compareTo(result.getAvgPrice()),
+                "BUY order should fill at customer ask price");
+    }
+
+    @Test
+    void createOrder_marketOrder_sellSide_shouldUseBidPrice() {
+        com.bank.trading.common.core.dto.QuoteDTO validQuote =
+                new com.bank.trading.common.core.dto.QuoteDTO();
+        validQuote.setSymbol("AU2406");
+        validQuote.setCustomerBidPrice(new BigDecimal("520.00"));
+        validQuote.setCustomerAskPrice(new BigDecimal("520.50"));
+        validQuote.setValidUntil(System.currentTimeMillis() + 30000);
+        priceProvider.quote = validQuote;
+
+        OrderCreateDTO request = createMarketOrder("C024", "CUST001", "AU2406", "SELL",
+                BigDecimal.valueOf(10));
+
+        OrderDTO result = orderService.createOrder(request);
+
+        assertNotNull(result);
+        assertEquals(OrderStatus.FILLED.getCode(), result.getStatus());
+        assertEquals(0, new BigDecimal("520.00").compareTo(result.getAvgPrice()),
+                "SELL order should fill at customer bid price");
     }
 }

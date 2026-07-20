@@ -140,6 +140,8 @@ class PricingServiceTest {
 
     @Test
     void onMarketData_updateMarketData_shouldGenerateNewQuote() {
+        pricingProperties.setThrottleWindowMs(0);
+
         pricingService.onMarketData("AU2406", BigDecimal.valueOf(520.00), BigDecimal.valueOf(520.50));
         QuoteDTO quote1 = pricingService.getLatestQuote("AU2406");
         long quoteId1 = quote1.getQuoteId();
@@ -250,5 +252,125 @@ class PricingServiceTest {
                 .divide(BigDecimal.valueOf(2), 6, BigDecimal.ROUND_HALF_UP);
         assertTrue(quote.getCustomerAskPrice().compareTo(midPrice) > 0,
                 "customer ask should be higher than mid price");
+    }
+
+    @Test
+    void quoteValidity_shouldBe3SecondsByDefault() {
+        pricingService.onMarketData("AU2406", BigDecimal.valueOf(520.00), BigDecimal.valueOf(520.50));
+        QuoteDTO quote = pricingService.getLatestQuote("AU2406");
+
+        assertNotNull(quote);
+        assertNotNull(quote.getValidUntil());
+        assertNotNull(quote.getTimestamp());
+
+        long validityMs = quote.getValidUntil() - quote.getTimestamp();
+        assertEquals(3000L, validityMs, "Quote validity should be 3 seconds (3000ms)");
+    }
+
+    @Test
+    void quoteValidity_shouldBeConfigurable() {
+        pricingProperties.setQuoteTtlSeconds(5);
+        pricingService.onMarketData("AU2406", BigDecimal.valueOf(520.00), BigDecimal.valueOf(520.50));
+        QuoteDTO quote = pricingService.getLatestQuote("AU2406");
+
+        assertNotNull(quote);
+        long validityMs = quote.getValidUntil() - quote.getTimestamp();
+        assertEquals(5000L, validityMs, "Quote validity should be 5 seconds when configured");
+    }
+
+    @Test
+    void throttle_withinWindow_shouldNotGenerateNewQuote() {
+        pricingProperties.setThrottleWindowMs(1000);
+
+        pricingService.onMarketData("AU2406", BigDecimal.valueOf(520.00), BigDecimal.valueOf(520.50));
+        QuoteDTO quote1 = pricingService.getLatestQuote("AU2406");
+        long quoteId1 = quote1.getQuoteId();
+        int eventCount1 = eventStoreService.appendCount;
+
+        pricingService.onMarketData("AU2406", BigDecimal.valueOf(521.00), BigDecimal.valueOf(521.50));
+        QuoteDTO quote2 = pricingService.getLatestQuote("AU2406");
+
+        assertEquals(quoteId1, quote2.getQuoteId(),
+                "Quote ID should not change within throttle window");
+        assertEquals(eventCount1, eventStoreService.appendCount,
+                "No new event should be published within throttle window");
+        assertEquals(0, new BigDecimal("520.00").compareTo(quote2.getMarketBidPrice()),
+                "Market price should not be updated in quote within throttle window");
+    }
+
+    @Test
+    void throttle_afterWindow_shouldGenerateNewQuote() throws InterruptedException {
+        pricingProperties.setThrottleWindowMs(50);
+
+        pricingService.onMarketData("AU2406", BigDecimal.valueOf(520.00), BigDecimal.valueOf(520.50));
+        QuoteDTO quote1 = pricingService.getLatestQuote("AU2406");
+        long quoteId1 = quote1.getQuoteId();
+
+        Thread.sleep(60);
+
+        pricingService.onMarketData("AU2406", BigDecimal.valueOf(521.00), BigDecimal.valueOf(521.50));
+        QuoteDTO quote2 = pricingService.getLatestQuote("AU2406");
+
+        assertNotEquals(quoteId1, quote2.getQuoteId(),
+                "Quote ID should change after throttle window expires");
+        assertEquals(0, new BigDecimal("521.00").compareTo(quote2.getMarketBidPrice()),
+                "Market price should be updated after throttle window");
+    }
+
+    @Test
+    void throttle_differentSymbols_shouldBeIndependent() {
+        pricingProperties.setThrottleWindowMs(1000);
+
+        pricingService.onMarketData("AU2406", BigDecimal.valueOf(520.00), BigDecimal.valueOf(520.50));
+        pricingService.onMarketData("AG2406", BigDecimal.valueOf(6280.0), BigDecimal.valueOf(6285.0));
+
+        assertEquals(2, eventStoreService.appendCount,
+                "Different symbols should not throttle each other");
+        assertEquals(2, pricingService.getSymbolCount());
+    }
+
+    @Test
+    void rfqQuote_shouldNotBeThrottled() {
+        pricingProperties.setThrottleWindowMs(1000);
+
+        pricingService.onMarketData("AU2406", BigDecimal.valueOf(520.00), BigDecimal.valueOf(520.50));
+        QuoteDTO quote1 = pricingService.getLatestQuote("AU2406");
+        long quoteId1 = quote1.getQuoteId();
+
+        QuoteDTO rfqQuote = pricingService.generateRfqQuote("AU2406", CustomerLevel.NORMAL);
+
+        assertNotNull(rfqQuote);
+        assertNotEquals(quoteId1, rfqQuote.getQuoteId(),
+                "RFQ quote should have different quote ID (not throttled)");
+    }
+
+    @Test
+    void getLatestQuote_expiredQuote_shouldReturnNull() {
+        pricingProperties.setQuoteTtlSeconds(1);
+
+        pricingService.onMarketData("AU2406", BigDecimal.valueOf(520.00), BigDecimal.valueOf(520.50));
+        QuoteDTO quote = pricingService.getLatestQuote("AU2406");
+        assertNotNull(quote);
+
+        quote.setValidUntil(System.currentTimeMillis() - 1000);
+
+        QuoteDTO expiredQuote = pricingService.getLatestQuote("AU2406");
+        assertNull(expiredQuote, "Expired quote should return null");
+    }
+
+    @Test
+    void rfqQuote_validity_shouldMatchConfiguredTtl() {
+        pricingProperties.setQuoteTtlSeconds(10);
+
+        pricingService.onMarketData("AU2406", BigDecimal.valueOf(520.00), BigDecimal.valueOf(520.50));
+        QuoteDTO rfqQuote = pricingService.generateRfqQuote("AU2406", CustomerLevel.VIP);
+
+        assertNotNull(rfqQuote);
+        assertNotNull(rfqQuote.getValidUntil());
+        assertNotNull(rfqQuote.getTimestamp());
+
+        long validityMs = rfqQuote.getValidUntil() - rfqQuote.getTimestamp();
+        assertEquals(10000L, validityMs,
+                "RFQ quote validity should match configured TTL");
     }
 }
