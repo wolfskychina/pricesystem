@@ -130,6 +130,31 @@
 - REST: `GET /marketdata/{symbol}` 查最新价
 
 ### 3.2 pricing-service（做市报价服务）
+
+【参考来源：**CME / 三大商品交易所做市商实践**】— 报价频率对标国内期货市场（中金所/三大商品交易所）：
+
+| 环节 | 频率 | 实现方式 |
+|------|------|---------|
+| 交易所行情推送 | 500ms | sim-exchange GBM 模型生成 |
+| market-data 行情归一化 | 事件驱动 | WebSocket 实时订阅 |
+| pricing 报价计算 | 事件驱动 + 节流(500ms) | 行情变更触发，同 symbol 500ms 内合并 |
+| customer-quote 推送 | 500ms-1秒 | pricing 算完即发布 |
+| notify WebSocket 推送 | 500ms-1秒 | notify 订阅后推送 |
+| REST 报价查询 | 即时 | Redis 缓存 O(1) 返回 |
+| 报价有效期（Quote TTL） | 3秒 | 超时自动失效，避免滑点 |
+
+**节流策略（Throttle）**：
+- pricing-service 内部维护 `(symbol, last_quote_time)` 缓存
+- 同一 symbol 在 500ms 内的多次行情变更只触发一次报价重算
+- 震荡行情时避免高频推送，保护 WebSocket 客户端
+- 节流窗口可配置（`pricing.throttle.window-ms=500`）
+
+**报价有效期设计**：
+- 每条报价消息携带 `expire_at` 字段（生成时间 + 3秒）
+- notify-service 推送时附带给客户端
+- 客户端下单时若报价已过期，强制重新询价（`POST /quotes/rfq`）
+- 防止客户用 5 秒前的报价在快速行情中成交造成滑点损失
+
 - 订阅 `market-data` 主题
 - 根据期货行情 + spread 计算客户买卖价
 - spread 按合约、客户等级配置
@@ -1333,7 +1358,43 @@ CREATE TABLE hedge_position (
 - **吞吐量大**：评估采用本地缓存 + 定时刷新，O(1) 复杂度，不阻塞下单流程
 - **风险可控**：多层防御兜底，确保最终风险可控
 
+### 2026-07-20 — pricing-service 报价频率与有效期设计
+
+**变更原因：**
+- 做市商报价频率需要根据资产类别确定，避免盲目使用高频（HFT）或低频（RFQ）模式
+- 缺乏报价有效期（Quote TTL）会导致客户使用过期报价成交，产生滑点损失
+- 缺乏节流逻辑会导致行情震荡时 WebSocket 推送风暴，影响客户端稳定性
+
+**对标参考：**
+- 国内期货市场（中金所/三大商品交易所）做市商实践
+- 行情推送 500ms、报价推送 500ms-1秒、报价有效期 3 秒
+
+**变更内容：**
+1. **更新 3.2 pricing-service 详细设计**：
+   - 增加报价频率表：覆盖 7 个环节的频率与实现方式
+   - 增加节流策略（Throttle）：500ms 窗口内同 symbol 行情变更合并重算
+   - 增加报价有效期设计：每条报价带 `expire_at` 字段，3 秒后失效
+   - 增加 RFQ 流程：客户端报价过期后强制重新询价
+
+2. **关键设计点**：
+   - 行情 → 报价：事件驱动（每次行情变更即触发）
+   - 报价 → 推送：节流 500ms（避免震荡行情推送风暴）
+   - 报价 → 客户端：携带 `expire_at`，客户端负责校验
+   - 下单 → 报价：服务端校验报价是否过期，过期则拒单并提示重新询价
+
 **影响范围：**
+- pricing-service：增加节流缓存（`ConcurrentHashMap<symbol, last_quote_time>`）
+- customer-quote 消息体：增加 `expire_at`、`throttle_window_ms` 字段
+- notify-service：推送时附带 `expire_at` 给 WebSocket 客户端
+- oms-service：下单时校验报价是否过期
+- 配置项：`pricing.throttle.window-ms=500`、`pricing.quote.ttl-seconds=3`
+
+### 2026-07-20 — 对冲失败应对方案实施计划
+
+**变更原因：**
+- 上文 3.7 章节仅完成设计，需要进一步落实实施范围与影响面
+
+**变更内容：**
 - execution-service：核心改造，新增预对冲评估、重试、自动平仓、DLQ 能力
 - oms-service：集成预对冲评估调用
 - reconciliation-service：新增对冲失败敞口对账维度
