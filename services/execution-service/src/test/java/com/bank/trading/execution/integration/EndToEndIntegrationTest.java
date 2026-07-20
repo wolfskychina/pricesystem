@@ -1,18 +1,22 @@
 package com.bank.trading.execution.integration;
 
 import com.bank.trading.common.core.event.TradeEvent;
+import com.bank.trading.common.core.idgen.IdGenerator;
 import com.bank.trading.execution.client.ExchangeSessionClient;
 import com.bank.trading.execution.dto.ExchangeOrderRequest;
 import com.bank.trading.execution.dto.ExchangeOrderResponse;
 import com.bank.trading.execution.dto.ExchangeTradeNotification;
 import com.bank.trading.execution.entity.HedgeBatchItem;
+import com.bank.trading.execution.entity.HedgeFailureExposure;
 import com.bank.trading.execution.entity.HedgeOrder;
 import com.bank.trading.execution.entity.HedgeTrade;
 import com.bank.trading.execution.mapper.HedgeBatchItemMapper;
+import com.bank.trading.execution.mapper.HedgeFailureExposureMapper;
 import com.bank.trading.execution.mapper.HedgeOrderMapper;
 import com.bank.trading.execution.mapper.HedgeTradeMapper;
 import com.bank.trading.execution.service.ExecutionService;
 import com.bank.trading.execution.service.HedgeBatcher;
+import com.bank.trading.execution.util.RetryHelper;
 import com.bank.trading.simexchange.callback.CallbackRegistry;
 import com.bank.trading.simexchange.engine.MarketDataEngine;
 import com.bank.trading.simexchange.engine.MatchingEngine;
@@ -63,10 +67,12 @@ class EndToEndIntegrationTest {
     private InMemoryHedgeOrderMapper hedgeOrderMapper;
     private InMemoryHedgeTradeMapper hedgeTradeMapper;
     private InMemoryBatchItemMapper batchItemMapper;
+    private InMemoryFailureExposureMapper failureExposureMapper;
     private CapturingKafkaTemplate kafkaTemplate;
     private BridgeExchangeSessionClient exchangeSessionClient;
     private ExecutionService executionService;
     private HedgeBatcher hedgeBatcher;
+    private StubIdGenerator idGenerator;
 
     @BeforeEach
     void setUp() {
@@ -87,7 +93,9 @@ class EndToEndIntegrationTest {
         hedgeOrderMapper = new InMemoryHedgeOrderMapper();
         hedgeTradeMapper = new InMemoryHedgeTradeMapper();
         batchItemMapper = new InMemoryBatchItemMapper();
+        failureExposureMapper = new InMemoryFailureExposureMapper();
         kafkaTemplate = new CapturingKafkaTemplate();
+        idGenerator = new StubIdGenerator();
 
         // 3. 打破循环依赖（ExecutionService → ExchangeSessionClient → MatchingEngine
         //    → CallbackRegistry → ExecutionService）：
@@ -106,7 +114,8 @@ class EndToEndIntegrationTest {
 
         // 7. 创建 ExecutionService（通过构造函数注入 exchangeSessionClient，避免反射设置 final 字段）
         executionService = new ExecutionService(hedgeOrderMapper, hedgeTradeMapper,
-                batchItemMapper, exchangeSessionClient, kafkaTemplate);
+                batchItemMapper, failureExposureMapper, exchangeSessionClient, kafkaTemplate,
+                idGenerator, new RetryHelper(6, 1000, 32000, 2.0, 0.3));
         setField(executionService, "tradeTopic", "trade-event");
         setField(executionService, "hedgeFillTopic", "hedge-fill-event");
         setField(executionService, "hedgeOrderType", "MARKET");
@@ -116,7 +125,7 @@ class EndToEndIntegrationTest {
         holder.service = executionService;
 
         // 9. 创建 HedgeBatcher（依赖 executionService）
-        hedgeBatcher = new HedgeBatcher(batchItemMapper, executionService);
+        hedgeBatcher = new HedgeBatcher(batchItemMapper, executionService, idGenerator);
         hedgeBatcher.setBatchingEnabled(true);
         hedgeBatcher.setBatchingWindowMs(999_999);    // 大窗口，避免定时触发
         hedgeBatcher.setSizeThreshold(new BigDecimal("999"));  // 大阈值，避免数量触发
@@ -147,7 +156,7 @@ class EndToEndIntegrationTest {
         assertEquals(3, batchedOrder.getBatchItemCount(), "应包含3个子项");
         assertDecimalEquals(new BigDecimal("10.0000"), batchedOrder.getQty(), "总量=5+3+2=10");
         assertEquals("BUY", batchedOrder.getSide(), "客户BUY→对冲BUY");
-        assertEquals("NEW", batchedOrder.getStatus(), "同步受理后状态为NEW");
+        assertEquals("SUBMITTED", batchedOrder.getStatus(), "同步受理后状态为SUBMITTED");
         assertNotNull(batchedOrder.getExchangeOrderId(), "应有交易所订单ID");
 
         // 验证 sim-exchange 也受理了订单
@@ -540,6 +549,45 @@ class EndToEndIntegrationTest {
         @Override public int countByStatus(String status) {
             return (int) orders.stream().filter(o -> status.equals(o.getStatus())).count();
         }
+        @Override public List<HedgeOrder> findReadyForRetry(long currentTime) {
+            return orders.stream()
+                    .filter(o -> "RETRYING".equals(o.getStatus()) && o.getNextRetryAt() != null && o.getNextRetryAt() <= currentTime)
+                    .toList();
+        }
+        @Override public List<HedgeOrder> findActiveOrders() {
+            return orders.stream()
+                    .filter(o -> List.of("PENDING", "RETRYING", "SUBMITTED").contains(o.getStatus()))
+                    .toList();
+        }
+        @Override public int updateForRetry(HedgeOrder order) {
+            return updateByExchangeOrderId(order);
+        }
+        @Override public List<HedgeOrder> findRetryingOrders(int limit) {
+            return orders.stream()
+                    .filter(o -> "RETRYING".equals(o.getStatus()))
+                    .limit(limit)
+                    .toList();
+        }
+    }
+
+    static class InMemoryFailureExposureMapper implements HedgeFailureExposureMapper {
+        final List<HedgeFailureExposure> exposures = new ArrayList<>();
+        long idSeq = 0;
+        @Override public void insert(HedgeFailureExposure e) { if (e.getId() == null) e.setId(++idSeq); exposures.add(e); }
+        @Override public List<HedgeFailureExposure> findByStatus(String status) { return exposures.stream().filter(e -> status.equals(e.getStatus())).toList(); }
+        @Override public List<HedgeFailureExposure> findBySymbolAndStatus(String symbol, String status) { return exposures.stream().filter(e -> symbol.equals(e.getSymbol()) && status.equals(e.getStatus())).toList(); }
+        @Override public HedgeFailureExposure findByOriginalTradeId(String tid) { return exposures.stream().filter(e -> tid.equals(e.getOriginalTradeId())).findFirst().orElse(null); }
+        @Override public void updateStatusByTradeId(String tid, String status, Long resolved) { exposures.stream().filter(e -> tid.equals(e.getOriginalTradeId())).forEach(e -> { e.setStatus(status); e.setResolvedAt(resolved); }); }
+        @Override public void update(HedgeFailureExposure e) { for (int i = 0; i < exposures.size(); i++) { if (e.getId() != null && e.getId().equals(exposures.get(i).getId())) { exposures.set(i, e); return; } } }
+        @Override public BigDecimal sumPendingQty() { return exposures.stream().filter(e -> "PENDING".equals(e.getStatus())).map(HedgeFailureExposure::getPendingQty).reduce(BigDecimal.ZERO, BigDecimal::add); }
+        @Override public BigDecimal sumExposureAmount() { return exposures.stream().filter(e -> "PENDING".equals(e.getStatus())).map(HedgeFailureExposure::getExposureAmount).reduce(BigDecimal.ZERO, BigDecimal::add); }
+        @Override public List<HedgeFailureExposureSummary> getSummaryBySymbol() { return List.of(); }
+    }
+
+    static class StubIdGenerator extends IdGenerator {
+        private long seq = 1000;
+        StubIdGenerator() { super(0, 0); }
+        @Override public long nextLongId() { return ++seq; }
     }
 
     static class InMemoryHedgeTradeMapper implements HedgeTradeMapper {

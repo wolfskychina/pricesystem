@@ -1,16 +1,20 @@
 package com.bank.trading.execution.service;
 
 import com.bank.trading.common.core.event.TradeEvent;
+import com.bank.trading.common.core.idgen.IdGenerator;
 import com.bank.trading.execution.client.ExchangeSessionClient;
 import com.bank.trading.execution.dto.ExchangeOrderRequest;
 import com.bank.trading.execution.dto.ExchangeOrderResponse;
 import com.bank.trading.execution.dto.ExchangeTradeNotification;
 import com.bank.trading.execution.entity.HedgeBatchItem;
+import com.bank.trading.execution.entity.HedgeFailureExposure;
 import com.bank.trading.execution.entity.HedgeOrder;
 import com.bank.trading.execution.entity.HedgeTrade;
 import com.bank.trading.execution.mapper.HedgeBatchItemMapper;
+import com.bank.trading.execution.mapper.HedgeFailureExposureMapper;
 import com.bank.trading.execution.mapper.HedgeOrderMapper;
 import com.bank.trading.execution.mapper.HedgeTradeMapper;
+import com.bank.trading.execution.util.RetryHelper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -36,18 +40,23 @@ class ExecutionServiceTest {
     private InMemoryHedgeOrderMapper hedgeOrderMapper;
     private InMemoryHedgeTradeMapper hedgeTradeMapper;
     private InMemoryBatchItemMapper batchItemMapper;
+    private InMemoryFailureExposureMapper failureExposureMapper;
     private StubExchangeSessionClient exchangeSessionClient;
     private CapturingKafkaTemplate kafkaTemplate;
+    private StubIdGenerator idGenerator;
 
     @BeforeEach
     void setUp() {
         hedgeOrderMapper = new InMemoryHedgeOrderMapper();
         hedgeTradeMapper = new InMemoryHedgeTradeMapper();
         batchItemMapper = new InMemoryBatchItemMapper();
+        failureExposureMapper = new InMemoryFailureExposureMapper();
         exchangeSessionClient = new StubExchangeSessionClient();
         kafkaTemplate = new CapturingKafkaTemplate();
+        idGenerator = new StubIdGenerator();
         executionService = new ExecutionService(hedgeOrderMapper, hedgeTradeMapper,
-                batchItemMapper, exchangeSessionClient, kafkaTemplate);
+                batchItemMapper, failureExposureMapper, exchangeSessionClient, kafkaTemplate,
+                idGenerator, new RetryHelper(6, 1000, 32000, 2.0, 0.3));
 
         setField(executionService, "tradeTopic", "trade-event");
         setField(executionService, "hedgeFillTopic", "hedge-fill-event");
@@ -79,7 +88,7 @@ class ExecutionServiceTest {
         assertEquals("BUY", hedgeOrder.getSide(), "客户 BUY 应触发对冲 BUY");
         assertEquals("AU2406", hedgeOrder.getSymbol());
         assertDecimalEquals(new BigDecimal("10.0000"), hedgeOrder.getQty());
-        assertEquals("NEW", hedgeOrder.getStatus());
+        assertEquals("SUBMITTED", hedgeOrder.getStatus());
         assertEquals("T001", hedgeOrder.getOriginalTradeId());
         assertEquals(0, hedgeOrder.getIsBatched());
     }
@@ -128,7 +137,7 @@ class ExecutionServiceTest {
         assertDoesNotThrow(() -> executionService.onTradeEventImmediate(event));
 
         HedgeOrder hedgeOrder = hedgeOrderMapper.orders.get(0);
-        assertEquals("NEW", hedgeOrder.getStatus());
+        assertEquals("RETRYING", hedgeOrder.getStatus());
         assertNull(hedgeOrder.getExchangeOrderId());
     }
 
@@ -435,6 +444,73 @@ class ExecutionServiceTest {
         @Override public int countByStatus(String status) {
             return (int) orders.stream().filter(o -> status.equals(o.getStatus())).count();
         }
+        @Override public List<HedgeOrder> findReadyForRetry(long currentTime) {
+            return orders.stream()
+                    .filter(o -> "RETRYING".equals(o.getStatus()) && o.getNextRetryAt() != null && o.getNextRetryAt() <= currentTime)
+                    .toList();
+        }
+        @Override public List<HedgeOrder> findActiveOrders() {
+            return orders.stream()
+                    .filter(o -> List.of("PENDING", "RETRYING", "SUBMITTED").contains(o.getStatus()))
+                    .toList();
+        }
+        @Override public int updateForRetry(HedgeOrder order) {
+            return updateByExchangeOrderId(order);
+        }
+        @Override public List<HedgeOrder> findRetryingOrders(int limit) {
+            return orders.stream()
+                    .filter(o -> "RETRYING".equals(o.getStatus()))
+                    .limit(limit)
+                    .toList();
+        }
+    }
+
+    static class InMemoryFailureExposureMapper implements HedgeFailureExposureMapper {
+        final List<HedgeFailureExposure> exposures = new ArrayList<>();
+        long idSeq = 0;
+
+        @Override public void insert(HedgeFailureExposure exposure) {
+            if (exposure.getId() == null) exposure.setId(++idSeq);
+            exposures.add(exposure);
+        }
+        @Override public List<HedgeFailureExposure> findByStatus(String status) {
+            return exposures.stream().filter(e -> status.equals(e.getStatus())).toList();
+        }
+        @Override public List<HedgeFailureExposure> findBySymbolAndStatus(String symbol, String status) {
+            return exposures.stream().filter(e -> symbol.equals(e.getSymbol()) && status.equals(e.getStatus())).toList();
+        }
+        @Override public HedgeFailureExposure findByOriginalTradeId(String originalTradeId) {
+            return exposures.stream().filter(e -> originalTradeId.equals(e.getOriginalTradeId())).findFirst().orElse(null);
+        }
+        @Override public void updateStatusByTradeId(String originalTradeId, String status, Long resolvedAt) {
+            exposures.stream().filter(e -> originalTradeId.equals(e.getOriginalTradeId()))
+                    .forEach(e -> { e.setStatus(status); e.setResolvedAt(resolvedAt); });
+        }
+        @Override public void update(HedgeFailureExposure exposure) {
+            for (int i = 0; i < exposures.size(); i++) {
+                if (exposure.getId() != null && exposure.getId().equals(exposures.get(i).getId())) {
+                    exposures.set(i, exposure);
+                    return;
+                }
+            }
+        }
+        @Override public BigDecimal sumPendingQty() {
+            return exposures.stream().filter(e -> "PENDING".equals(e.getStatus()))
+                    .map(HedgeFailureExposure::getPendingQty).reduce(BigDecimal.ZERO, BigDecimal::add);
+        }
+        @Override public BigDecimal sumExposureAmount() {
+            return exposures.stream().filter(e -> "PENDING".equals(e.getStatus()))
+                    .map(HedgeFailureExposure::getExposureAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
+        }
+        @Override public List<HedgeFailureExposureSummary> getSummaryBySymbol() {
+            return List.of();
+        }
+    }
+
+    static class StubIdGenerator extends IdGenerator {
+        private long seq = 1000;
+        StubIdGenerator() { super(0, 0); }
+        @Override public long nextLongId() { return ++seq; }
     }
 
     static class InMemoryHedgeTradeMapper implements HedgeTradeMapper {

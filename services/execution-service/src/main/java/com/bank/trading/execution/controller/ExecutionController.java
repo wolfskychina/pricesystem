@@ -51,9 +51,9 @@ public class ExecutionController {
     }
 
     @PostMapping("/hedge-capacity/check")
-    public Result<Void> checkHedgeCapacity(@RequestParam String symbol,
-                                           @RequestParam BigDecimal qty,
-                                           @RequestParam String side) {
+    public Result<Object> checkHedgeCapacity(@RequestParam String symbol,
+                                             @RequestParam BigDecimal qty,
+                                             @RequestParam String side) {
         try {
             capacityChecker.checkCapacity(symbol, qty, side);
             return Result.success();
