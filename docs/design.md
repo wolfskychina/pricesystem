@@ -44,34 +44,54 @@
                                        │ REST/WebSocket
                                 ┌──────▼──────┐
                                 │ API Gateway │
+                                │ (traceId注入│
+                                │  路由转发)   │
                                 └──────┬──────┘
        ┌──────────────────────────────┼──────────────────────────────┐
        │                              │                              │
 ┌──────▼───────┐  ┌────────────┐  ┌──▼─────────┐  ┌────────────┐  ┌──▼──────────┐
 │ Quote Service│  │ OMS Service│  │Pricing Svc │  │ Risk Svc   │  │Account Svc  │
 │  (报价查询)  │  │ (订单管理) │  │ (做市报价) │  │ (风控)     │  │ (客户账户)  │
-└──────┬───────┘  └─────┬──────┘  └─────┬──────┘  └─────┬──────┘  └─────────────┘
-       │                │               │               │
-       └────────────────┴───────┬───────┴───────────────┘
-                               │
-                   ┌───────────▼────────────┐
-                   │   Kafka 消息总线        │
-                   └───────────┬────────────┘
-                               │
-        ┌──────────────────────┼──────────────────────┐
-        │                      │                      │
-┌───────▼────────┐  ┌──────────▼─────────┐  ┌────────▼────────┐
-│ MarketData Svc │  │ Execution Svc      │  │ Position Svc    │
-│ (行情接入)     │  │ (对冲执行)         │  │ (持仓管理)      │
-└───────┬────────┘  └──────────┬─────────┘  └─────────────────┘
-        │                      │
-        │           ┌──────────▼────────────┐
-        │           │  Simulated Exchange   │ ← 模拟期货交易所
-        └──────────►│  (独立进程,随机波动)   │
-                    └───────────────────────┘
+└──────┬───────┘  └─────┬──────┘  └─────┬──────┘  └─────┬──────┘  └──────┬───────┘
+       │                │               │               │              │
+       └────────────────┴───────┬───────┴───────────────┘              │
+                               │                                       │
+                   ┌───────────▼────────────┐                          │
+                   │   Kafka 消息总线        │                          │
+                   └───────────┬────────────┘                          │
+                               │                                       │
+        ┌──────────────────────┼──────────────────────┐               │
+        │                      │                      │               │
+┌───────▼────────┐  ┌──────────▼─────────┐  ┌────────▼────────┐       │
+│ MarketData Svc │  │ Execution Svc      │  │ Position Svc    │       │
+│ (行情接入)     │  │ (对冲执行)         │  │ (持仓管理)      │       │
+└───────┬────────┘  └──────────┬─────────┘  └────────┬────────┘       │
+        │                      │                      │               │
+        │           ┌──────────▼────────────┐         │               │
+        │           │  Simulated Exchange   │ ← 模拟期货交易所         │
+        └──────────►│  (独立进程,随机波动)   │         │               │
+                    └───────────────────────┘         │               │
+                                                       │               │
+        ┌──────────────────────────────────────────────┼───────────────┘
+        │                                              │
+┌───────▼────────┐                          ┌──────────▼─────────┐
+│ Notify Svc     │                          │ Reconciliation Svc │
+│ (WebSocket推送)│                          │ (定时跨服务对账)    │
+└───────┬────────┘                          └───────────────────┘
+        │
+        │ 消费 trade-event / hedge-fill-event
+        │
+        ▼
+┌────────────────────┐
+│  客户端 WebSocket  │
+│  (按customer订阅)   │
+└────────────────────┘
 ```
 
-辅助服务：Eureka（注册发现）、Config Server（配置中心）、RefData Service（基础数据）、Notify Service（推送）。
+辅助服务：
+- **Eureka**（注册发现）、**Config Server**（配置中心）、**RefData Service**（基础数据）
+- **Outbox Relay Service**：独立进程，轮询各服务 outbox 表，投递到 Kafka
+- **Sim Client**：模拟客户下单，用于压测和联调验证
 
 ### 2.2 服务清单
 
@@ -79,7 +99,7 @@
 |---|---|---|
 | eureka-server | 服务注册与发现 | P0 |
 | config-server | 配置中心 | P0 |
-| gateway | API 网关 | P3 |
+| gateway | API 网关（traceId 注入、路由转发、CORS） | P3 |
 | refdata-service | 基础数据（合约/交易日历） | P0 |
 | market-data-service | 行情接入与分发 | P1 |
 | pricing-service | 做市报价计算 | P1 |
@@ -88,9 +108,11 @@
 | execution-service | 对冲执行 | P2 |
 | position-service | 持仓管理 | P2 |
 | account-service | 客户账户 | P2 |
-| notify-service | 消息推送（WebSocket） | P3 |
-| sim-exchange | 模拟期货交易所 | P0 |
-| sim-client | 模拟客户 | P3 |
+| notify-service | 消息推送（WebSocket + Kafka 多主题消费） | P3 |
+| reconciliation-service | 定时跨服务对账（敞口/额度/对冲挂单） | P3 |
+| outbox-relay-service | Outbox 消息投递（轮询 outbox 表 → Kafka） | P2 |
+| sim-exchange | 模拟期货交易所（异步两阶段撮合 + GBM 行情） | P0 |
+| sim-client | 模拟客户下单（批量/单笔，用于压测和联调） | P3 |
 | frontend | 报价监控面板 | P2 |
 
 ---
@@ -201,11 +223,24 @@ trade-event → HedgeBatcher.enqueue
 - REST 查询
 
 ### 3.9 notify-service（推送服务）
-- 订阅 Kafka 多主题
-- WebSocket 推送给连接的客户
-- 支持按客户订阅主题
+- 订阅 Kafka 多主题（trade-event / hedge-fill-event）
+- WebSocket 推送给连接的客户，支持按 customerId + type 双重过滤订阅
+- 会话注册表模式：ConcurrentHashMap + CopyOnWriteArraySet 维护连接与订阅关系
+- REST: `GET /notify/health`、`GET /notify/stats`
+- 端口 8087
 
-### 3.10 sim-exchange（模拟期货交易所）
+### 3.10 reconciliation-service（对账服务）
+- 定时（@Scheduled cron，默认每 5 分钟）跨服务对账
+- 三维度对账：
+  - **敞口对账**：遍历每个 symbol 的净敞口，|netExposure| > threshold 则记录不一致
+  - **额度对账**：sum(usedCredit) vs sum(|customerPosition|)，差异超过阈值则告警
+  - **对冲挂单对账**：检查 status=NEW 的对冲订单数（说明对冲延迟）
+- 下游依赖：position-service（敞口）、account-service（额度）、execution-service（对冲订单）
+- 对账结果缓存在内存中，供 REST 接口查询
+- REST: `GET /reconciliation/last`（最近结果）、`POST /reconciliation/trigger`（手动触发）、`GET /reconciliation/health`
+- 端口 8089
+
+### 3.11 sim-exchange（模拟期货交易所）
 
 【参考来源：**几何布朗运动（GBM）模型**】— 金融数学中描述资产价格随时间波动的经典随机过程，是 Black-Scholes 期权定价模型的基础假设。真实市场中股票、期货等资产的价格走势大致符合对数正态分布，GBM 模型通过漂移率（μ）和波动率（σ）两个参数来刻画价格的长期趋势和短期波动幅度，生成的行情比简单随机游走更接近真实市场。
 
@@ -275,7 +310,7 @@ sim-exchange:
   intervalMs: 1000  # 行情推送间隔
 ```
 
-### 3.11 前端：报价监控面板
+### 3.12 前端：报价监控面板
 - **最简实现**：单页 HTML + JavaScript（或 Vue 最简版）
 - 功能：实时展示交易所报价 + 做市商报价表格
 - 可调刷新频率（1s / 5s / 10s / 30s）
@@ -530,7 +565,7 @@ trading-system/
 ├── docs/
 │   └── design.md                        (本文档)
 ├── common/
-│   ├── common-core/                     (DTO/枚举/异常/ShardRouter)
+│   ├── common-core/                     (DTO/枚举/异常/ShardRouter/Result)
 │   └── common-persistence/              (MyBatis基类/DataSource/Outbox/EventStore)
 ├── infra/
 │   ├── eureka-server/
@@ -544,17 +579,19 @@ trading-system/
 │   ├── execution-service/
 │   ├── position-service/
 │   ├── account-service/
-│   ├── notify-service/
-│   └── gateway/
+│   ├── outbox-relay-service/            (Outbox 消息投递)
+│   ├── notify-service/                  (WebSocket 推送 + Kafka 消费)
+│   ├── reconciliation-service/          (定时跨服务对账)
+│   └── gateway/                         (API 网关)
 ├── sim/
 │   ├── sim-exchange/                    (模拟期货交易所，独立进程)
 │   └── sim-client/                      (模拟客户，独立进程)
+├── tests/
+│   └── integration-tests/               (端到端集成测试)
 ├── frontend/                            (报价监控面板)
 └── db/
-    ├── sqlite/
-    │   └── V1__init.sql
-    └── postgres/
-        └── V1__init.sql
+    ├── sqlite/                          (SQLite Flyway 迁移脚本)
+    └── postgres/                        (PostgreSQL Flyway 迁移脚本)
 ```
 
 ---
@@ -827,5 +864,6 @@ CREATE TABLE hedge_position (
 | P1 | oms-service, risk-service | 订单与风控（交易核心） |
 | P1 | frontend（报价面板） | 前端展示 |
 | P2 | execution-service, position-service, account-service | 闭环 |
+| P2 | outbox-relay-service | Outbox 消息投递，事件分发保障 |
 | P3 | notify-service, sim-client, gateway | 完善与联调 |
-| P3 | 对账任务 | 一致性兜底 |
+| P3 | reconciliation-service | 定时跨服务对账（敞口/额度/对冲挂单） |
