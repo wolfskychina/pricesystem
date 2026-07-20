@@ -9,3 +9,4 @@ target/
 .project
 .DS_Store
 *.log
+.mvn/
