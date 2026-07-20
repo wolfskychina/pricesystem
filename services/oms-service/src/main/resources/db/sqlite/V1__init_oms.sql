@@ -3,7 +3,7 @@
 
 -- 客户订单表：记录客户下达的订单及撮合状态
 CREATE TABLE IF NOT EXISTS orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,             -- 自增主键
+    id BIGINT PRIMARY KEY,                            -- 分布式 ID 主键（应用层 Snowflake 发号器生成）
     order_id VARCHAR(64) NOT NULL UNIQUE,             -- 订单业务 ID（系统生成，全局唯一）
     client_order_id VARCHAR(64) NOT NULL,             -- 客户自定义订单 ID（用于幂等去重）
     customer_id VARCHAR(32) NOT NULL,                 -- 客户 ID
@@ -27,7 +27,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 
 -- 客户成交流水表：记录客户订单的成交结果
 CREATE TABLE IF NOT EXISTS trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,             -- 自增主键
+    id BIGINT PRIMARY KEY,                            -- 分布式 ID 主键（应用层 Snowflake 发号器生成）
     trade_id VARCHAR(64) NOT NULL UNIQUE,             -- 成交业务 ID（系统生成，全局唯一）
     order_id VARCHAR(64) NOT NULL,                    -- 关联订单 ID
     client_order_id VARCHAR(64),                      -- 关联客户自定义订单 ID

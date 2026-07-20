@@ -1,12 +1,12 @@
 -- OMS-service PostgreSQL 初始化脚本
--- 适配差异：INTEGER PRIMARY KEY AUTOINCREMENT -> BIGSERIAL PRIMARY KEY
+-- 适配差异：INTEGER PRIMARY KEY AUTOINCREMENT -> BIGINT PRIMARY KEY
 --          DATETIME -> TIMESTAMP
 -- 强制使用 UTF-8 客户端编码，确保中文字段注释/数据正确写入
 SET client_encoding TO 'UTF8';
 
 -- 客户订单表：记录客户下达的订单及撮合状态
 CREATE TABLE IF NOT EXISTS orders (
-    id BIGSERIAL PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     order_id VARCHAR(64) NOT NULL UNIQUE,
     client_order_id VARCHAR(64) NOT NULL,
     customer_id VARCHAR(32) NOT NULL,
@@ -29,7 +29,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_client ON orders(client_order_id, customer
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 
 COMMENT ON TABLE orders IS '客户订单表：记录客户下达的订单及撮合状态';
-COMMENT ON COLUMN orders.id IS '自增主键';
+COMMENT ON COLUMN orders.id IS '分布式 ID 主键（应用层 Snowflake 发号器生成）';
 COMMENT ON COLUMN orders.order_id IS '订单业务 ID（系统生成，全局唯一）';
 COMMENT ON COLUMN orders.client_order_id IS '客户自定义订单 ID（用于幂等去重）';
 COMMENT ON COLUMN orders.customer_id IS '客户 ID';
@@ -48,7 +48,7 @@ COMMENT ON COLUMN orders.updated_at IS '更新时间';
 
 -- 客户成交流水表：记录客户订单的成交结果
 CREATE TABLE IF NOT EXISTS trades (
-    id BIGSERIAL PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     trade_id VARCHAR(64) NOT NULL UNIQUE,
     order_id VARCHAR(64) NOT NULL,
     client_order_id VARCHAR(64),
@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_trades_order ON trades(order_id);
 CREATE INDEX IF NOT EXISTS idx_trades_customer ON trades(customer_id);
 
 COMMENT ON TABLE trades IS '客户成交流水表：记录客户订单的成交结果';
-COMMENT ON COLUMN trades.id IS '自增主键';
+COMMENT ON COLUMN trades.id IS '分布式 ID 主键（应用层 Snowflake 发号器生成）';
 COMMENT ON COLUMN trades.trade_id IS '成交业务 ID（系统生成，全局唯一）';
 COMMENT ON COLUMN trades.order_id IS '关联订单 ID';
 COMMENT ON COLUMN trades.client_order_id IS '关联客户自定义订单 ID';

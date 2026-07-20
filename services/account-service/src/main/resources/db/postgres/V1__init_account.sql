@@ -5,7 +5,7 @@
 SET client_encoding TO 'UTF8';
 
 CREATE TABLE IF NOT EXISTS customer (
-    id BIGSERIAL PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     customer_id VARCHAR(32) NOT NULL UNIQUE,
     name VARCHAR(128),
     level VARCHAR(16) DEFAULT 'NORMAL',
@@ -21,7 +21,7 @@ CREATE INDEX IF NOT EXISTS idx_customer_status ON customer(status);
 CREATE INDEX IF NOT EXISTS idx_customer_level ON customer(level);
 
 COMMENT ON TABLE customer IS '客户账户表：客户主数据 + 信用额度 + 已用额度（可用额度 = credit_limit - used_credit）';
-COMMENT ON COLUMN customer.id IS '自增主键';
+COMMENT ON COLUMN customer.id IS '分布式 ID 主键（应用层 Snowflake 发号器生成）';
 COMMENT ON COLUMN customer.customer_id IS '客户唯一标识（业务主键）';
 COMMENT ON COLUMN customer.name IS '客户名称';
 COMMENT ON COLUMN customer.level IS '客户等级（NORMAL/VIP）';

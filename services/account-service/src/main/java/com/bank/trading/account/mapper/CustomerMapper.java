@@ -19,11 +19,10 @@ public interface CustomerMapper {
      * @param customer 客户实体
      * @return 影响行数
      */
-    @Insert("INSERT INTO customer(customer_id, name, level, status, credit_limit, " +
+    @Insert("INSERT INTO customer(id, customer_id, name, level, status, credit_limit, " +
             "used_credit, version, created_at, updated_at) " +
-            "VALUES(#{customerId}, #{name}, #{level}, #{status}, #{creditLimit}, " +
+            "VALUES(#{id}, #{customerId}, #{name}, #{level}, #{status}, #{creditLimit}, " +
             "#{usedCredit}, #{version}, #{createdAt}, #{updatedAt})")
-    @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(Customer customer);
 
     /**

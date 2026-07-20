@@ -3,7 +3,7 @@
 
 -- outbox 表：事件转发表（事务性发件箱模式，保证业务表写入与事件发布的原子性）
 CREATE TABLE IF NOT EXISTS outbox (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT, -- 自增主键
+  id          BIGINT PRIMARY KEY, -- 分布式 ID 主键（应用层 Snowflake 发号器生成）
   event_id    VARCHAR(64) NOT NULL UNIQUE,       -- 事件唯一 ID（用于幂等去重）
   topic       VARCHAR(64) NOT NULL,              -- Kafka 目标 topic
   partition_key VARCHAR(64),                     -- Kafka 分区键（通常为 symbol/customerId）

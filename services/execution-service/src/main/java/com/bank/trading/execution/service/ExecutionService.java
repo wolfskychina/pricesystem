@@ -3,6 +3,7 @@ package com.bank.trading.execution.service;
 import com.bank.trading.common.core.enums.OrderSide;
 import com.bank.trading.common.core.event.HedgeFillEvent;
 import com.bank.trading.common.core.event.TradeEvent;
+import com.bank.trading.common.core.idgen.IdGenerator;
 import com.bank.trading.execution.client.ExchangeSessionClient;
 import com.bank.trading.execution.dto.ExchangeOrderRequest;
 import com.bank.trading.execution.dto.ExchangeOrderResponse;
@@ -56,6 +57,7 @@ public class ExecutionService {
     private final HedgeBatchItemMapper batchItemMapper;
     private final ExchangeSessionClient exchangeSessionClient;
     private final KafkaTemplate<String, String> kafkaTemplate;
+    private final IdGenerator idGenerator;
 
     /** 客户成交事件 topic */
     @Value("${execution.trade-topic:trade-event}")
@@ -86,12 +88,14 @@ public class ExecutionService {
                             HedgeTradeMapper hedgeTradeMapper,
                             HedgeBatchItemMapper batchItemMapper,
                             ExchangeSessionClient exchangeSessionClient,
-                            KafkaTemplate<String, String> kafkaTemplate) {
+                            KafkaTemplate<String, String> kafkaTemplate,
+                            IdGenerator idGenerator) {
         this.hedgeOrderMapper = hedgeOrderMapper;
         this.hedgeTradeMapper = hedgeTradeMapper;
         this.batchItemMapper = batchItemMapper;
         this.exchangeSessionClient = exchangeSessionClient;
         this.kafkaTemplate = kafkaTemplate;
+        this.idGenerator = idGenerator;
     }
 
     /**
@@ -135,6 +139,7 @@ public class ExecutionService {
 
         // 3. 构造并持久化对冲订单（状态=NEW，isBatched=0）
         HedgeOrder hedgeOrder = new HedgeOrder();
+        hedgeOrder.setId(idGenerator.nextLongId());
         hedgeOrder.setHedgeOrderId(UUID.randomUUID().toString().replace("-", ""));
         hedgeOrder.setOriginalTradeId(event.getTradeId());
         hedgeOrder.setCustomerId(event.getCustomerId());
@@ -187,6 +192,7 @@ public class ExecutionService {
 
         // 1. 构造聚合对冲订单
         HedgeOrder hedgeOrder = new HedgeOrder();
+        hedgeOrder.setId(idGenerator.nextLongId());
         hedgeOrder.setHedgeOrderId(UUID.randomUUID().toString().replace("-", ""));
         hedgeOrder.setSymbol(symbol);
         hedgeOrder.setSide(side);
@@ -287,6 +293,7 @@ public class ExecutionService {
 
         // 3. 持久化成交流水
         HedgeTrade hedgeTrade = new HedgeTrade();
+        hedgeTrade.setId(idGenerator.nextLongId());
         hedgeTrade.setHedgeOrderId(hedgeOrder.getHedgeOrderId());
         hedgeTrade.setExchangeOrderId(notification.getOrderId());
         hedgeTrade.setExchangeTradeId(notification.getTradeId());

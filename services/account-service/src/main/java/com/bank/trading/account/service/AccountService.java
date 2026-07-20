@@ -2,6 +2,7 @@ package com.bank.trading.account.service;
 
 import com.bank.trading.common.core.enums.OrderSide;
 import com.bank.trading.common.core.event.TradeEvent;
+import com.bank.trading.common.core.idgen.IdGenerator;
 import com.bank.trading.common.persistence.idempotent.IdempotentConsumer;
 import com.bank.trading.account.dto.CreditInfo;
 import com.bank.trading.account.entity.Customer;
@@ -46,11 +47,14 @@ public class AccountService {
 
     private final CustomerMapper customerMapper;
     private final IdempotentConsumer idempotentConsumer;
+    private final IdGenerator idGenerator;
 
     public AccountService(CustomerMapper customerMapper,
-                          IdempotentConsumer idempotentConsumer) {
+                          IdempotentConsumer idempotentConsumer,
+                          IdGenerator idGenerator) {
         this.customerMapper = customerMapper;
         this.idempotentConsumer = idempotentConsumer;
+        this.idGenerator = idGenerator;
     }
 
     // ==================== 客户主数据 CRUD ====================
@@ -80,6 +84,7 @@ public class AccountService {
         if (customer.getLevel() == null) customer.setLevel("NORMAL");
         if (customer.getStatus() == null) customer.setStatus("ACTIVE");
         if (customer.getUsedCredit() == null) customer.setUsedCredit(BigDecimal.ZERO);
+        customer.setId(idGenerator.nextLongId());
         customer.setVersion(0);
         long now = System.currentTimeMillis();
         customer.setCreatedAt(now);

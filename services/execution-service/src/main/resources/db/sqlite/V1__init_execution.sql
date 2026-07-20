@@ -1,7 +1,7 @@
 -- 对冲订单表：记录做市商向交易所提交的对冲单
 -- 注意：SQLite 数据库文件默认使用 UTF-8 编码，无需显式设置
 CREATE TABLE IF NOT EXISTS hedge_orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,             -- 自增主键
+    id BIGINT PRIMARY KEY,                            -- 分布式 ID 主键（应用层 Snowflake 发号器生成）
     hedge_order_id VARCHAR(64) NOT NULL UNIQUE,       -- 对冲订单业务 ID
     exchange_order_id VARCHAR(64),                    -- 交易所返回的订单 ID
     original_trade_id VARCHAR(64),                    -- 触发本次对冲的客户成交 ID
@@ -24,7 +24,7 @@ CREATE INDEX IF NOT EXISTS idx_hedge_orders_symbol ON hedge_orders(symbol);
 
 -- 对冲成交流水表：记录对冲单在交易所的成交结果
 CREATE TABLE IF NOT EXISTS hedge_trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,             -- 自增主键
+    id BIGINT PRIMARY KEY,                            -- 分布式 ID 主键（应用层 Snowflake 发号器生成）
     hedge_order_id VARCHAR(64) NOT NULL,              -- 对应的对冲订单 ID
     exchange_order_id VARCHAR(64),                    -- 交易所订单 ID
     exchange_trade_id VARCHAR(64) NOT NULL UNIQUE,    -- 交易所成交 ID（用于幂等去重）

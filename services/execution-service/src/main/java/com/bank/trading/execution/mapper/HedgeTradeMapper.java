@@ -17,11 +17,10 @@ public interface HedgeTradeMapper {
      * @param trade 对冲成交实体
      * @return 影响行数
      */
-    @Insert("INSERT INTO hedge_trades(hedge_order_id, exchange_order_id, exchange_trade_id, original_trade_id, " +
+    @Insert("INSERT INTO hedge_trades(id, hedge_order_id, exchange_order_id, exchange_trade_id, original_trade_id, " +
             "symbol, side, qty, price, amount, trade_time, created_at) " +
-            "VALUES(#{hedgeOrderId}, #{exchangeOrderId}, #{exchangeTradeId}, #{originalTradeId}, " +
+            "VALUES(#{id}, #{hedgeOrderId}, #{exchangeOrderId}, #{exchangeTradeId}, #{originalTradeId}, " +
             "#{symbol}, #{side}, #{qty}, #{price}, #{amount}, #{tradeTime}, #{createdAt})")
-    @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(HedgeTrade trade);
 
     /**

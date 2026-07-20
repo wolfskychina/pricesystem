@@ -11,12 +11,11 @@ import java.util.List;
 @Mapper
 public interface HedgeBatchItemMapper {
 
-    @Insert("INSERT INTO hedge_batch_items(hedge_order_id, original_trade_id, customer_id, " +
+    @Insert("INSERT INTO hedge_batch_items(id, hedge_order_id, original_trade_id, customer_id, " +
             "symbol, side, qty, status, filled_qty, avg_price, created_at, updated_at) " +
-            "VALUES(#{hedgeOrderId}, #{originalTradeId}, #{customerId}, " +
+            "VALUES(#{id}, #{hedgeOrderId}, #{originalTradeId}, #{customerId}, " +
             "#{symbol}, #{side}, #{qty}, #{status}, #{filledQty}, #{avgPrice}, " +
             "#{createdAt}, #{updatedAt})")
-    @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(HedgeBatchItem item);
 
     @Select("SELECT * FROM hedge_batch_items WHERE hedge_order_id = #{hedgeOrderId} ORDER BY id")

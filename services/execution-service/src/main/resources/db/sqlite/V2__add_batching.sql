@@ -1,7 +1,7 @@
 -- 对冲聚合子项表：记录聚合对冲订单与每笔原始客户成交的对应关系
 -- 注意：SQLite 数据库文件默认使用 UTF-8 编码，无需显式设置
 CREATE TABLE IF NOT EXISTS hedge_batch_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,             -- 自增主键
+    id BIGINT PRIMARY KEY,                            -- 分布式 ID 主键（应用层 Snowflake 发号器生成）
     hedge_order_id VARCHAR(64),                       -- 归属的聚合对冲订单 ID（出桶后填充）
     original_trade_id VARCHAR(64) NOT NULL UNIQUE,    -- 原始客户成交 ID（用于幂等去重）
     customer_id VARCHAR(32),                          -- 客户 ID

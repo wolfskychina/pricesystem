@@ -19,9 +19,8 @@ public interface HedgePositionMapper {
      * @param position 对冲持仓实体
      * @return 影响行数
      */
-    @Insert("INSERT INTO hedge_position(symbol, qty, avg_cost, version, updated_at) " +
-            "VALUES(#{symbol}, #{qty}, #{avgCost}, #{version}, #{updatedAt})")
-    @Options(useGeneratedKeys = true, keyProperty = "id")
+    @Insert("INSERT INTO hedge_position(id, symbol, qty, avg_cost, version, updated_at) " +
+            "VALUES(#{id}, #{symbol}, #{qty}, #{avgCost}, #{version}, #{updatedAt})")
     int insert(HedgePosition position);
 
     /**

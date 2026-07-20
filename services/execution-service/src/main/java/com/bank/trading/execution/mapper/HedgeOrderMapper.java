@@ -19,13 +19,12 @@ public interface HedgeOrderMapper {
      * @param order 对冲订单实体
      * @return 影响行数
      */
-    @Insert("INSERT INTO hedge_orders(hedge_order_id, exchange_order_id, original_trade_id, customer_id, " +
+    @Insert("INSERT INTO hedge_orders(id, hedge_order_id, exchange_order_id, original_trade_id, customer_id, " +
             "symbol, side, type, qty, price, filled_qty, avg_price, status, is_batched, batch_item_count, " +
             "created_at, updated_at) " +
-            "VALUES(#{hedgeOrderId}, #{exchangeOrderId}, #{originalTradeId}, #{customerId}, " +
+            "VALUES(#{id}, #{hedgeOrderId}, #{exchangeOrderId}, #{originalTradeId}, #{customerId}, " +
             "#{symbol}, #{side}, #{type}, #{qty}, #{price}, #{filledQty}, #{avgPrice}, #{status}, " +
             "#{isBatched}, #{batchItemCount}, #{createdAt}, #{updatedAt})")
-    @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(HedgeOrder order);
 
     /**

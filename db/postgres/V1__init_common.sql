@@ -4,7 +4,7 @@ SET client_encoding TO 'UTF8';
 
 -- outbox 表：事件转发表（事务性发件箱模式，保证业务表写入与事件发布的原子性）
 CREATE TABLE IF NOT EXISTS outbox (
-  id          BIGSERIAL PRIMARY KEY,
+  id          BIGINT PRIMARY KEY,
   event_id    VARCHAR(64) NOT NULL UNIQUE,
   topic       VARCHAR(64) NOT NULL,
   partition_key VARCHAR(64),
@@ -19,7 +19,7 @@ CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status, id);
 CREATE INDEX IF NOT EXISTS idx_outbox_shard ON outbox(shard_id, status, id);
 
 COMMENT ON TABLE outbox IS '事件转发表（事务性发件箱模式，保证业务表写入与事件发布的原子性）';
-COMMENT ON COLUMN outbox.id IS '自增主键';
+COMMENT ON COLUMN outbox.id IS '分布式 ID 主键（应用层 Snowflake 发号器生成）';
 COMMENT ON COLUMN outbox.event_id IS '事件唯一 ID（用于幂等去重）';
 COMMENT ON COLUMN outbox.topic IS 'Kafka 目标 topic';
 COMMENT ON COLUMN outbox.partition_key IS 'Kafka 分区键（通常为 symbol/customerId）';

@@ -1,11 +1,11 @@
 -- refdata-service PostgreSQL 初始化脚本
--- 适配差异：INTEGER PRIMARY KEY AUTOINCREMENT -> BIGSERIAL PRIMARY KEY
+-- 适配差异：INTEGER PRIMARY KEY AUTOINCREMENT -> BIGINT PRIMARY KEY
 -- 强制使用 UTF-8 客户端编码，确保中文字段注释/数据正确写入
 SET client_encoding TO 'UTF8';
 
 -- 合约主数据表：记录期货合约静态信息（合约代码、乘数、tick 等）
 CREATE TABLE IF NOT EXISTS contract (
-  id          BIGSERIAL PRIMARY KEY,
+  id          BIGINT PRIMARY KEY,
   code        VARCHAR(32) NOT NULL UNIQUE,
   name        VARCHAR(64),
   exchange    VARCHAR(32),
@@ -24,7 +24,7 @@ CREATE INDEX IF NOT EXISTS idx_contract_exchange ON contract(exchange);
 CREATE INDEX IF NOT EXISTS idx_contract_status ON contract(status);
 
 COMMENT ON TABLE contract IS '合约主数据表：记录期货合约静态信息（合约代码、乘数、tick 等）';
-COMMENT ON COLUMN contract.id IS '自增主键';
+COMMENT ON COLUMN contract.id IS '分布式 ID 主键（应用层 Snowflake 发号器生成）';
 COMMENT ON COLUMN contract.code IS '合约代码（如 AU2406）';
 COMMENT ON COLUMN contract.name IS '合约中文名（如 黄金2406）';
 COMMENT ON COLUMN contract.exchange IS '交易所代码（如 SHFE）';

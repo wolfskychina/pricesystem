@@ -3,7 +3,7 @@
 SET client_encoding TO 'UTF8';
 
 CREATE TABLE IF NOT EXISTS hedge_batch_items (
-    id BIGSERIAL PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     hedge_order_id VARCHAR(64),
     original_trade_id VARCHAR(64) NOT NULL UNIQUE,
     customer_id VARCHAR(32),
@@ -23,7 +23,7 @@ CREATE INDEX IF NOT EXISTS idx_batch_items_symbol ON hedge_batch_items(symbol);
 CREATE INDEX IF NOT EXISTS idx_batch_items_status ON hedge_batch_items(status);
 
 COMMENT ON TABLE hedge_batch_items IS '对冲聚合子项表：记录聚合对冲订单与每笔原始客户成交的对应关系';
-COMMENT ON COLUMN hedge_batch_items.id IS '自增主键';
+COMMENT ON COLUMN hedge_batch_items.id IS '分布式 ID 主键（应用层 Snowflake 发号器生成）';
 COMMENT ON COLUMN hedge_batch_items.hedge_order_id IS '归属的聚合对冲订单 ID（出桶后填充）';
 COMMENT ON COLUMN hedge_batch_items.original_trade_id IS '原始客户成交 ID（用于幂等去重）';
 COMMENT ON COLUMN hedge_batch_items.customer_id IS '客户 ID';

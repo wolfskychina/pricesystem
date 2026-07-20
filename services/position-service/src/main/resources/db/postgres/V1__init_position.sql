@@ -4,7 +4,7 @@
 SET client_encoding TO 'UTF8';
 
 CREATE TABLE IF NOT EXISTS position (
-    id BIGSERIAL PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     customer_id VARCHAR(32) NOT NULL,
     symbol VARCHAR(32) NOT NULL,
     qty DECIMAL(20,4) NOT NULL DEFAULT 0,
@@ -19,7 +19,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_pos_cust_sym ON position(customer_id, symb
 CREATE INDEX IF NOT EXISTS idx_pos_customer ON position(customer_id);
 
 COMMENT ON TABLE position IS '客户持仓表：记录每个客户在每个合约上的净持仓与成本（qty 正=多头，负=空头）';
-COMMENT ON COLUMN position.id IS '自增主键';
+COMMENT ON COLUMN position.id IS '分布式 ID 主键（应用层 Snowflake 发号器生成）';
 COMMENT ON COLUMN position.customer_id IS '客户 ID';
 COMMENT ON COLUMN position.symbol IS '合约代码';
 COMMENT ON COLUMN position.qty IS '净持仓数量（正=多头，负=空头）';
@@ -32,7 +32,7 @@ COMMENT ON COLUMN position.updated_at IS '更新时间（epoch 毫秒）';
 -- 对冲持仓表：记录做市商对冲头寸，按合约维度汇总（不区分客户）
 -- qty 正=多头对冲，负=空头对冲；按 symbol 唯一
 CREATE TABLE IF NOT EXISTS hedge_position (
-    id BIGSERIAL PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     symbol VARCHAR(32) NOT NULL UNIQUE,
     qty DECIMAL(20,4) NOT NULL DEFAULT 0,
     avg_cost DECIMAL(20,8) DEFAULT 0,
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS hedge_position (
 );
 
 COMMENT ON TABLE hedge_position IS '对冲持仓表：记录做市商对冲头寸，按合约维度汇总（不区分客户）';
-COMMENT ON COLUMN hedge_position.id IS '自增主键';
+COMMENT ON COLUMN hedge_position.id IS '分布式 ID 主键（应用层 Snowflake 发号器生成）';
 COMMENT ON COLUMN hedge_position.symbol IS '合约代码';
 COMMENT ON COLUMN hedge_position.qty IS '净对冲持仓（正=多头对冲，负=空头对冲）';
 COMMENT ON COLUMN hedge_position.avg_cost IS '对冲持仓均价';

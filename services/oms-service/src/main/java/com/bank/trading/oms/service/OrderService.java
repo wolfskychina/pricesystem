@@ -5,6 +5,7 @@ import com.bank.trading.common.core.enums.OrderSide;
 import com.bank.trading.common.core.enums.OrderStatus;
 import com.bank.trading.common.core.enums.OrderType;
 import com.bank.trading.common.core.event.TradeEvent;
+import com.bank.trading.common.core.idgen.IdGenerator;
 import com.bank.trading.common.persistence.eventstore.EventStoreService;
 import com.bank.trading.common.persistence.outbox.OutboxService;
 import com.bank.trading.oms.entity.Order;
@@ -33,6 +34,7 @@ public class OrderService {
     private final OutboxService outboxService;
     private final RiskChecker riskChecker;
     private final PriceProvider priceProvider;
+    private final IdGenerator idGenerator;
 
     @Value("${oms.trade-topic:trade-event}")
     private String tradeTopic;
@@ -44,13 +46,15 @@ public class OrderService {
                         EventStoreService eventStoreService,
                         OutboxService outboxService,
                         RiskChecker riskChecker,
-                        PriceProvider priceProvider) {
+                        PriceProvider priceProvider,
+                        IdGenerator idGenerator) {
         this.orderMapper = orderMapper;
         this.tradeMapper = tradeMapper;
         this.eventStoreService = eventStoreService;
         this.outboxService = outboxService;
         this.riskChecker = riskChecker;
         this.priceProvider = priceProvider;
+        this.idGenerator = idGenerator;
     }
 
     @Transactional
@@ -63,6 +67,7 @@ public class OrderService {
         }
 
         Order order = new Order();
+        order.setId(idGenerator.nextLongId());
         order.setOrderId(generateOrderId());
         order.setClientOrderId(createDTO.getClientOrderId());
         order.setCustomerId(createDTO.getCustomerId());
@@ -131,6 +136,7 @@ public class OrderService {
         BigDecimal filledAmount = filledQty.multiply(executionPrice).setScale(4, RoundingMode.HALF_UP);
 
         Trade trade = new Trade();
+        trade.setId(idGenerator.nextLongId());
         trade.setTradeId(generateTradeId());
         trade.setOrderId(order.getOrderId());
         trade.setClientOrderId(order.getClientOrderId());

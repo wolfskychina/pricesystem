@@ -8,11 +8,10 @@ import java.util.List;
 @Mapper
 public interface OrderMapper {
 
-    @Insert("INSERT INTO orders(order_id, client_order_id, customer_id, symbol, side, type, qty, filled_qty, " +
+    @Insert("INSERT INTO orders(id, order_id, client_order_id, customer_id, symbol, side, type, qty, filled_qty, " +
             "price, avg_price, status, reject_reason, trace_id, created_at, updated_at) " +
-            "VALUES(#{orderId}, #{clientOrderId}, #{customerId}, #{symbol}, #{side}, #{type}, #{qty}, #{filledQty}, " +
+            "VALUES(#{id}, #{orderId}, #{clientOrderId}, #{customerId}, #{symbol}, #{side}, #{type}, #{qty}, #{filledQty}, " +
             "#{price}, #{avgPrice}, #{status}, #{rejectReason}, #{traceId}, #{createdAt}, #{updatedAt})")
-    @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(Order order);
 
     @Update("UPDATE orders SET filled_qty=#{filledQty}, avg_price=#{avgPrice}, status=#{status}, " +

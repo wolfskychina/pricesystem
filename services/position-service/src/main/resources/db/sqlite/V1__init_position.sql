@@ -2,7 +2,7 @@
 -- qty 正=多头，负=空头；按 (customer_id, symbol) 唯一
 -- 注意：SQLite 数据库文件默认使用 UTF-8 编码，无需显式设置
 CREATE TABLE IF NOT EXISTS position (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,             -- 自增主键
+    id BIGINT PRIMARY KEY,                            -- 分布式 ID 主键（应用层 Snowflake 发号器生成）
     customer_id VARCHAR(32) NOT NULL,                 -- 客户 ID
     symbol VARCHAR(32) NOT NULL,                      -- 合约代码
     qty DECIMAL(20,4) NOT NULL DEFAULT 0,             -- 净持仓数量（正=多头，负=空头）
@@ -19,7 +19,7 @@ CREATE INDEX IF NOT EXISTS idx_pos_customer ON position(customer_id);
 -- 对冲持仓表：记录做市商对冲头寸，按合约维度汇总（不区分客户）
 -- qty 正=多头对冲，负=空头对冲；按 symbol 唯一
 CREATE TABLE IF NOT EXISTS hedge_position (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,             -- 自增主键
+    id BIGINT PRIMARY KEY,                            -- 分布式 ID 主键（应用层 Snowflake 发号器生成）
     symbol VARCHAR(32) NOT NULL UNIQUE,               -- 合约代码
     qty DECIMAL(20,4) NOT NULL DEFAULT 0,             -- 净对冲持仓（正=多头对冲，负=空头对冲）
     avg_cost DECIMAL(20,8) DEFAULT 0,                 -- 对冲持仓均价

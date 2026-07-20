@@ -8,11 +8,10 @@ import java.util.List;
 @Mapper
 public interface TradeMapper {
 
-    @Insert("INSERT INTO trades(trade_id, order_id, client_order_id, customer_id, symbol, side, qty, price, " +
+    @Insert("INSERT INTO trades(id, trade_id, order_id, client_order_id, customer_id, symbol, side, qty, price, " +
             "amount, trade_type, trade_time) " +
-            "VALUES(#{tradeId}, #{orderId}, #{clientOrderId}, #{customerId}, #{symbol}, #{side}, #{qty}, #{price}, " +
+            "VALUES(#{id}, #{tradeId}, #{orderId}, #{clientOrderId}, #{customerId}, #{symbol}, #{side}, #{qty}, #{price}, " +
             "#{amount}, #{tradeType}, #{tradeTime})")
-    @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(Trade trade);
 
     @Select("SELECT * FROM trades WHERE order_id = #{orderId} ORDER BY trade_time")

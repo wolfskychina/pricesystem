@@ -2,6 +2,7 @@ package com.bank.trading.common.persistence.outbox;
 
 import com.alibaba.fastjson2.JSON;
 import com.bank.trading.common.core.event.BaseEvent;
+import com.bank.trading.common.core.idgen.IdGenerator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -23,6 +24,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class OutboxServiceImpl implements OutboxService {
 
     private final OutboxMapper outboxMapper;
+    private final IdGenerator idGenerator;
 
     private final Map<String, Boolean> sentCache = new ConcurrentHashMap<>();
 
@@ -30,6 +32,7 @@ public class OutboxServiceImpl implements OutboxService {
     @Transactional
     public void saveEvent(String topic, BaseEvent event, int shardId) {
         OutboxMessage message = new OutboxMessage();
+        message.setId(idGenerator.nextLongId());
         message.setEventId(event.getEventId());
         message.setTopic(topic);
         message.setPartitionKey(event.getPartitionKey());

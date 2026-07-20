@@ -3,7 +3,7 @@
 -- 由 account-service 维护，risk-service 事前风控时查询，trade-event 消费时扣减/释放
 -- 注意：SQLite 数据库文件默认使用 UTF-8 编码，无需显式设置
 CREATE TABLE IF NOT EXISTS customer (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,             -- 自增主键
+    id BIGINT PRIMARY KEY,                            -- 分布式 ID 主键（应用层 Snowflake 发号器生成）
     customer_id VARCHAR(32) NOT NULL UNIQUE,          -- 客户唯一标识（业务主键）
     name VARCHAR(128),                                -- 客户名称
     level VARCHAR(16) DEFAULT 'NORMAL',               -- 客户等级（NORMAL/VIP）

@@ -3,7 +3,7 @@
 
 -- 合约主数据表：记录期货合约静态信息（合约代码、乘数、tick 等）
 CREATE TABLE IF NOT EXISTS contract (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT, -- 自增主键
+  id          BIGINT PRIMARY KEY, -- 分布式 ID 主键（应用层 Snowflake 发号器生成）
   code        VARCHAR(32) NOT NULL UNIQUE,       -- 合约代码（如 AU2406）
   name        VARCHAR(64),                       -- 合约中文名（如 黄金2406）
   exchange    VARCHAR(32),                       -- 交易所代码（如 SHFE）

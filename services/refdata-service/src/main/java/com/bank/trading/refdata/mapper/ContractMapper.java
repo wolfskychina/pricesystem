@@ -91,11 +91,10 @@ public interface ContractMapper {
      *                 以及 createdAt、updatedAt 时间戳
      * @return 受影响的行数，通常为 1
      */
-    @Insert("INSERT INTO contract (code, name, exchange, product, multiplier, tick_size, min_qty, " +
+    @Insert("INSERT INTO contract (id, code, name, exchange, product, multiplier, tick_size, min_qty, " +
             "listed_date, expiry_date, status, created_at, updated_at) " +
-            "VALUES (#{code}, #{name}, #{exchange}, #{product}, #{multiplier}, #{tickSize}, #{minQty}, " +
+            "VALUES (#{id}, #{code}, #{name}, #{exchange}, #{product}, #{multiplier}, #{tickSize}, #{minQty}, " +
             "#{listedDate}, #{expiryDate}, #{status}, #{createdAt}, #{updatedAt})")
-    @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(Contract contract);
 
     /**

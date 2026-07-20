@@ -521,7 +521,10 @@ public interface ShardDataSourceProvider {
    - Mapper XML 中用 `databaseId="sqlite"` / `databaseId="postgresql"` 区分
 
 3. **SQL 兼容性约束**
-   - 主键自增：SQLite 用 `AUTOINCREMENT`，PG 用 `SERIAL/IDENTITY`
+   - **主键生成：应用层 Snowflake 发号器（`IdGenerator`），所有表主键为 `BIGINT PRIMARY KEY`，不再依赖数据库自增**
+    - 64 位 long 型 ID：timestamp(41) + datacenter(5) + worker(5) + sequence(12)
+    - 单实例 QPS ~409.6 万，天然分布式，ID 有序递增利于索引
+    - 时钟回拨检测：回拨时抛异常，由上层重试或降级
    - 时间字段：统一用 Java 生成后写入，避免数据库函数差异
    - 字符串类型：统一用 `VARCHAR` / `TEXT`
 
@@ -711,7 +714,7 @@ public class DefaultRiskRuleEngine implements RiskRuleEngine {
 **outbox 表**
 ```sql
 CREATE TABLE outbox (
-  id          INTEGER PRIMARY KEY,
+  id          BIGINT PRIMARY KEY,  -- 分布式 ID（应用层 Snowflake 发号器生成）
   event_id    VARCHAR(64) NOT NULL UNIQUE,
   topic       VARCHAR(64) NOT NULL,
   partition_key VARCHAR(64),
@@ -758,7 +761,7 @@ CREATE TABLE processed_events (
 **contract 表**
 ```sql
 CREATE TABLE contract (
-  id          INTEGER PRIMARY KEY,
+  id          BIGINT PRIMARY KEY,  -- 分布式 ID（应用层 Snowflake 发号器生成）
   code        VARCHAR(32) NOT NULL UNIQUE,
   name        VARCHAR(64),
   exchange    VARCHAR(32),
@@ -779,7 +782,7 @@ CREATE TABLE contract (
 **customer 表**
 ```sql
 CREATE TABLE customer (
-  id           INTEGER PRIMARY KEY,
+  id           BIGINT PRIMARY KEY,  -- 分布式 ID（应用层 Snowflake 发号器生成）
   customer_id  VARCHAR(32) NOT NULL UNIQUE,
   name         VARCHAR(128),
   level        VARCHAR(16),   -- VIP/NORMAL
@@ -796,7 +799,7 @@ CREATE TABLE customer (
 **orders 表**
 ```sql
 CREATE TABLE orders (
-  id               INTEGER PRIMARY KEY,
+  id               BIGINT PRIMARY KEY,  -- 分布式 ID（应用层 Snowflake 发号器生成）
   order_id         VARCHAR(32) NOT NULL UNIQUE,
   client_order_id  VARCHAR(64),
   customer_id      VARCHAR(32) NOT NULL,
@@ -823,7 +826,7 @@ CREATE UNIQUE INDEX idx_orders_cl_ord ON orders(customer_id, client_order_id);
 **position 表**
 ```sql
 CREATE TABLE position (
-  id           INTEGER PRIMARY KEY,
+  id           BIGINT PRIMARY KEY,  -- 分布式 ID（应用层 Snowflake 发号器生成）
   customer_id  VARCHAR(32) NOT NULL,
   symbol       VARCHAR(32) NOT NULL,
   qty          DECIMAL(18,4) NOT NULL,  -- 正=多,负=空
@@ -841,7 +844,7 @@ CREATE UNIQUE INDEX idx_pos_cust_sym ON position(customer_id, symbol, shard_id);
 **hedge_position 表**
 ```sql
 CREATE TABLE hedge_position (
-  id           INTEGER PRIMARY KEY,
+  id           BIGINT PRIMARY KEY,  -- 分布式 ID（应用层 Snowflake 发号器生成）
   symbol       VARCHAR(32) NOT NULL UNIQUE,
   qty          DECIMAL(18,4) NOT NULL,
   avg_cost     DECIMAL(18,8),
@@ -867,3 +870,61 @@ CREATE TABLE hedge_position (
 | P2 | outbox-relay-service | Outbox 消息投递，事件分发保障 |
 | P3 | notify-service, sim-client, gateway | 完善与联调 |
 | P3 | reconciliation-service | 定时跨服务对账（敞口/额度/对冲挂单） |
+
+---
+
+## 十三、设计变更历史
+
+> 本章节记录设计文档的重大变更，便于追溯设计演进与决策背景。
+
+### 2026-07-20 — 主键生成策略：数据库自增 → 应用层 Snowflake 发号器
+
+**变更原因：**
+- 数据库自增主键（`AUTOINCREMENT` / `BIGSERIAL`）在分布式环境下存在瓶颈：
+  - 单点依赖：所有写操作集中到数据库的自增计数器，高并发时成为热点
+  - 跨库冲突：分片场景下不同分片的自增序列独立，无法保证全局唯一
+  - 顺序不连续：批量插入、事务回滚等导致 ID 不连续，不利于基于 ID 的排序与分页
+  - 数据库切换成本高：SQLite 与 PostgreSQL 的自增语法差异大（`AUTOINCREMENT` vs `SERIAL/IDENTITY`）
+
+**变更内容：**
+1. **新增 `common-core.idgen` 模块**：实现 Snowflake 风格分布式 ID 生成器（`IdGenerator`）
+   - 64 位 long 型 ID：timestamp(41) + datacenterId(5) + workerId(5) + sequence(12)
+   - 单实例 QPS ~409.6 万，纯内存计算，无数据库依赖
+   - 时钟回拨检测：检测到系统时钟回拨时抛异常，由上层重试或降级
+   - Spring 自动配置：`IdGeneratorConfig` 通过 `@Value` 注入 datacenterId / workerId
+2. **修改所有建表脚本**：14 个 SQLite + 14 个 PostgreSQL Flyway 迁移脚本
+   - `INTEGER PRIMARY KEY AUTOINCREMENT` → `BIGINT PRIMARY KEY`
+   - `BIGSERIAL PRIMARY KEY` → `BIGINT PRIMARY KEY`
+   - 注释同步更新：`自增主键` → `分布式 ID 主键（应用层 Snowflake 发号器生成）`
+3. **修改所有 Mapper**：9 个 Mapper 的 `@Insert` 语句添加 `id` 字段
+   - 移除 `@Options(useGeneratedKeys = true, keyProperty = "id")`
+4. **修改所有 Service**：7 个业务 Service + `OutboxServiceImpl` 注入 `IdGenerator`
+   - 在 `INSERT` 前调用 `entity.setId(idGenerator.nextLongId())`
+   - 涉及：AccountService、ContractService、OrderService、ExecutionService、HedgeBatcher、PositionService、OutboxServiceImpl
+
+**影响范围：**
+- 全项目 14 个 SQL 脚本、9 个 Mapper、8 个 Service
+- 对现有数据无影响（仅修改建表脚本，尚未有生产数据）
+- 性能提升：ID 生成从数据库往返（~1-5ms）降至纯内存计算（~1μs）
+- 分片友好：long 型 ID 可直接取模用于分片路由（`id % totalShards`）
+
+**决策记录：**
+- 对比了 Snowflake、Leaf-Segment、Leaf-Snowflake、UID Generator 四种方案
+- 选择 Snowflake 原因：
+  - 无外部依赖（Leaf 需 DB/ZK），与当前架构最轻量
+  - 性能足够（4096 个/毫秒 > 业务峰值）
+  - ID 有序递增，利于 B+Tree 索引
+  - 64 位 long 可直接用于分片路由
+
+### 2026-07-20 — 架构总览更新：补充 P3 阶段新增模块
+
+**变更原因：**
+- P3 阶段实际开发了 4 个模块（gateway、sim-client、notify-service、reconciliation-service）
+- 设计文档的架构总览图、服务清单、模块详细设计、工程结构、实施优先级均未体现 reconciliation-service 和 outbox-relay-service
+
+**变更内容：**
+- 更新 2.1 架构总览图：新增 Notify Service、Reconciliation Service 节点
+- 更新 2.2 服务清单：新增 reconciliation-service、outbox-relay-service
+- 新增 3.9 notify-service / 3.10 reconciliation-service 详细设计
+- 更新八、工程结构：新增 outbox-relay-service、reconciliation-service、tests/integration-tests
+- 更新十二、实施优先级：新增 outbox-relay-service（P2）、reconciliation-service（P3）

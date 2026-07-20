@@ -3,6 +3,7 @@ package com.bank.trading.position.service;
 import com.bank.trading.common.core.enums.OrderSide;
 import com.bank.trading.common.core.event.HedgeFillEvent;
 import com.bank.trading.common.core.event.TradeEvent;
+import com.bank.trading.common.core.idgen.IdGenerator;
 import com.bank.trading.common.persistence.idempotent.IdempotentConsumer;
 import com.bank.trading.position.entity.HedgePosition;
 import com.bank.trading.position.entity.NetExposure;
@@ -59,13 +60,16 @@ public class PositionService {
     private final PositionMapper positionMapper;
     private final HedgePositionMapper hedgePositionMapper;
     private final IdempotentConsumer idempotentConsumer;
+    private final IdGenerator idGenerator;
 
     public PositionService(PositionMapper positionMapper,
                            HedgePositionMapper hedgePositionMapper,
-                           IdempotentConsumer idempotentConsumer) {
+                           IdempotentConsumer idempotentConsumer,
+                           IdGenerator idGenerator) {
         this.positionMapper = positionMapper;
         this.hedgePositionMapper = hedgePositionMapper;
         this.idempotentConsumer = idempotentConsumer;
+        this.idGenerator = idGenerator;
     }
 
     // ==================== 客户持仓更新 ====================
@@ -105,6 +109,7 @@ public class PositionService {
 
         if (isNew) {
             position = new Position();
+            position.setId(idGenerator.nextLongId());
             position.setCustomerId(event.getCustomerId());
             position.setSymbol(event.getSymbol());
             position.setQty(BigDecimal.ZERO);
@@ -167,6 +172,7 @@ public class PositionService {
 
         if (isNew) {
             hedgePosition = new HedgePosition();
+            hedgePosition.setId(idGenerator.nextLongId());
             hedgePosition.setSymbol(event.getSymbol());
             hedgePosition.setQty(BigDecimal.ZERO);
             hedgePosition.setAvgCost(BigDecimal.ZERO);

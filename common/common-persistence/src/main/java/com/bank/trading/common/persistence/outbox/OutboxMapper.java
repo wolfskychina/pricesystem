@@ -38,8 +38,8 @@ public interface OutboxMapper {
      * @param message outbox 消息
      * @return 影响行数（1 表示成功）
      */
-    @Insert("INSERT INTO outbox (event_id, topic, partition_key, payload, status, retry_count, created_at, shard_id) " +
-            "VALUES (#{eventId}, #{topic}, #{partitionKey}, #{payload}, #{status}, #{retryCount}, #{createdAt}, #{shardId})")
+    @Insert("INSERT INTO outbox (id, event_id, topic, partition_key, payload, status, retry_count, created_at, shard_id) " +
+            "VALUES (#{id}, #{eventId}, #{topic}, #{partitionKey}, #{payload}, #{status}, #{retryCount}, #{createdAt}, #{shardId})")
     int insert(OutboxMessage message);
 
     /**

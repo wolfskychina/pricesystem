@@ -22,11 +22,10 @@ public interface PositionMapper {
      * @param position 持仓实体
      * @return 影响行数
      */
-    @Insert("INSERT INTO position(customer_id, symbol, qty, avg_cost, realized_pnl, version, " +
+    @Insert("INSERT INTO position(id, customer_id, symbol, qty, avg_cost, realized_pnl, version, " +
             "created_at, updated_at) " +
-            "VALUES(#{customerId}, #{symbol}, #{qty}, #{avgCost}, #{realizedPnl}, #{version}, " +
+            "VALUES(#{id}, #{customerId}, #{symbol}, #{qty}, #{avgCost}, #{realizedPnl}, #{version}, " +
             "#{createdAt}, #{updatedAt})")
-    @Options(useGeneratedKeys = true, keyProperty = "id")
     int insert(Position position);
 
     /**

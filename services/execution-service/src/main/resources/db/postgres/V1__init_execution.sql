@@ -3,7 +3,7 @@
 SET client_encoding TO 'UTF8';
 
 CREATE TABLE IF NOT EXISTS hedge_orders (
-    id BIGSERIAL PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     hedge_order_id VARCHAR(64) NOT NULL UNIQUE,
     exchange_order_id VARCHAR(64),
     original_trade_id VARCHAR(64),
@@ -25,7 +25,7 @@ CREATE INDEX IF NOT EXISTS idx_hedge_orders_status ON hedge_orders(status);
 CREATE INDEX IF NOT EXISTS idx_hedge_orders_symbol ON hedge_orders(symbol);
 
 COMMENT ON TABLE hedge_orders IS '对冲订单表：记录做市商向交易所提交的对冲单';
-COMMENT ON COLUMN hedge_orders.id IS '自增主键';
+COMMENT ON COLUMN hedge_orders.id IS '分布式 ID 主键（应用层 Snowflake 发号器生成）';
 COMMENT ON COLUMN hedge_orders.hedge_order_id IS '对冲订单业务 ID';
 COMMENT ON COLUMN hedge_orders.exchange_order_id IS '交易所返回的订单 ID';
 COMMENT ON COLUMN hedge_orders.original_trade_id IS '触发本次对冲的客户成交 ID';
@@ -43,7 +43,7 @@ COMMENT ON COLUMN hedge_orders.updated_at IS '更新时间（epoch 毫秒）';
 
 -- 对冲成交流水表：记录对冲单在交易所的成交结果
 CREATE TABLE IF NOT EXISTS hedge_trades (
-    id BIGSERIAL PRIMARY KEY,
+    id BIGINT PRIMARY KEY,
     hedge_order_id VARCHAR(64) NOT NULL,
     exchange_order_id VARCHAR(64),
     exchange_trade_id VARCHAR(64) NOT NULL UNIQUE,
@@ -62,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_hedge_trades_exchange ON hedge_trades(exchange_or
 CREATE INDEX IF NOT EXISTS idx_hedge_trades_symbol ON hedge_trades(symbol);
 
 COMMENT ON TABLE hedge_trades IS '对冲成交流水表：记录对冲单在交易所的成交结果';
-COMMENT ON COLUMN hedge_trades.id IS '自增主键';
+COMMENT ON COLUMN hedge_trades.id IS '分布式 ID 主键（应用层 Snowflake 发号器生成）';
 COMMENT ON COLUMN hedge_trades.hedge_order_id IS '对应的对冲订单 ID';
 COMMENT ON COLUMN hedge_trades.exchange_order_id IS '交易所订单 ID';
 COMMENT ON COLUMN hedge_trades.exchange_trade_id IS '交易所成交 ID（用于幂等去重）';

@@ -2,6 +2,7 @@ package com.bank.trading.execution.service;
 
 import com.bank.trading.common.core.enums.OrderSide;
 import com.bank.trading.common.core.event.TradeEvent;
+import com.bank.trading.common.core.idgen.IdGenerator;
 import com.bank.trading.execution.entity.HedgeBatchItem;
 import com.bank.trading.execution.mapper.HedgeBatchItemMapper;
 import org.slf4j.Logger;
@@ -41,6 +42,7 @@ public class HedgeBatcher {
 
     private final HedgeBatchItemMapper batchItemMapper;
     private final ExecutionService executionService;
+    private final IdGenerator idGenerator;
 
     /** 聚合开关：true=开启聚合，false=每笔成交独立对冲（兼容旧行为） */
     @Value("${execution.batching-enabled:false}")
@@ -65,9 +67,11 @@ public class HedgeBatcher {
      */
     private final ConcurrentHashMap<String, List<HedgeBatchItem>> buckets = new ConcurrentHashMap<>();
 
-    public HedgeBatcher(HedgeBatchItemMapper batchItemMapper, ExecutionService executionService) {
+    public HedgeBatcher(HedgeBatchItemMapper batchItemMapper, ExecutionService executionService,
+                        IdGenerator idGenerator) {
         this.batchItemMapper = batchItemMapper;
         this.executionService = executionService;
+        this.idGenerator = idGenerator;
     }
 
     /**
@@ -97,6 +101,7 @@ public class HedgeBatcher {
 
         // 构造子项并持久化（状态=PENDING）
         HedgeBatchItem item = new HedgeBatchItem();
+        item.setId(idGenerator.nextLongId());
         item.setOriginalTradeId(event.getTradeId());
         item.setCustomerId(event.getCustomerId());
         item.setSymbol(event.getSymbol());

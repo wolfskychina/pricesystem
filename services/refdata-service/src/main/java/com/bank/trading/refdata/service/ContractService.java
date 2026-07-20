@@ -2,6 +2,7 @@ package com.bank.trading.refdata.service;
 
 import com.bank.trading.common.core.dto.ContractDTO;
 import com.bank.trading.common.core.exception.BusinessException;
+import com.bank.trading.common.core.idgen.IdGenerator;
 import com.bank.trading.refdata.entity.Contract;
 import com.bank.trading.refdata.mapper.ContractMapper;
 import org.springframework.stereotype.Service;
@@ -31,6 +32,7 @@ public class ContractService {
 
     /** 合约数据访问层，基于 MyBatis 注解 SQL 实现合约表的增删改查 */
     private final ContractMapper contractMapper;
+    private final IdGenerator idGenerator;
 
     /** 日志记录器，用于记录关键业务操作（如创建、更新合约等） */
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ContractService.class);
@@ -39,9 +41,11 @@ public class ContractService {
      * 通过构造器注入合约数据访问层实例。
      *
      * @param contractMapper 合约 Mapper 实例
+     * @param idGenerator    分布式 ID 发号器
      */
-    public ContractService(ContractMapper contractMapper) {
+    public ContractService(ContractMapper contractMapper, IdGenerator idGenerator) {
         this.contractMapper = contractMapper;
+        this.idGenerator = idGenerator;
     }
 
     /**
@@ -138,6 +142,7 @@ public class ContractService {
             throw new BusinessException(400, "Contract already exists: " + dto.getCode());
         }
         Contract contract = toEntity(dto);
+        contract.setId(idGenerator.nextLongId());
         // 由服务端写入时间戳，确保创建/更新时间一致且不被客户端伪造
         contract.setCreatedAt(LocalDateTime.now());
         contract.setUpdatedAt(LocalDateTime.now());
@@ -145,7 +150,7 @@ public class ContractService {
         if (contract.getStatus() == null) {
             contract.setStatus("ACTIVE");
         }
-        contractMapper.insert(contract); // useGeneratedKeys 会将数据库自增主键回填到 contract.id
+        contractMapper.insert(contract);
         return toDTO(contract);
     }
 
