@@ -320,16 +320,17 @@ trade-event → HedgeBatcher.enqueue
 ```
 
 **State Definitions**:
-| State | Description | Allowed Transitions |
-|-------|-------------|---------------------|
-| PENDING | Enqueued or created but not yet submitted | → SUBMITTED / FAILED |
-| SUBMITTED | Submitted to exchange, awaiting report | → RETRYING / FILLED / PARTIAL_FILLED / REJECTED |
-| RETRYING | Submission failed, awaiting next retry | → SUBMITTED / FAILED / EMERGENCY_HEDGED |
-| FILLED | Fully filled | Terminal |
-| PARTIAL_FILLED | Partially filled | → FILLED / EMERGENCY_HEDGED |
-| REJECTED | Exchange business rejection (insufficient margin, etc.) | → FAILED / EMERGENCY_HEDGED |
-| FAILED | Retries exhausted or system error | → DLQ / EMERGENCY_HEDGED |
-| EMERGENCY_HEDGED | Auto-unwind executed | Terminal |
+
+| State            | Description                                             | Allowed Transitions                              | Terminal |
+|------------------|---------------------------------------------------------|--------------------------------------------------|----------|
+| PENDING          | Enqueued or created but not yet submitted               | → SUBMITTED / FAILED                             | No       |
+| SUBMITTED        | Submitted to exchange, awaiting report                  | → RETRYING / FILLED / PARTIAL_FILLED / REJECTED  | No       |
+| RETRYING         | Submission failed, awaiting next retry                  | → SUBMITTED / FAILED / EMERGENCY_HEDGED          | No       |
+| FILLED           | Fully filled                                            | —                                                | Yes      |
+| PARTIAL_FILLED   | Partially filled                                        | → FILLED / EMERGENCY_HEDGED                      | No       |
+| REJECTED         | Exchange business rejection (insufficient margin, etc.) | → FAILED / EMERGENCY_HEDGED                      | No       |
+| FAILED           | Retries exhausted or system error                       | → DLQ / EMERGENCY_HEDGED                         | Yes      |
+| EMERGENCY_HEDGED | Auto-unwind executed                                    | —                                                | Yes      |
 
 #### 3.7.4 Pre-Hedge Assessment (Hedge-First)
 
@@ -485,12 +486,13 @@ CREATE INDEX idx_hfe_symbol ON hedge_failure_exposure(symbol, status);
 ```
 
 **Status Definitions**:
-| Status | Description |
-|--------|-------------|
-| PENDING | Awaiting hedge; exposure not yet resolved |
-| HEDGED | Hedge successful; exposure resolved |
-| EMERGENCY_CLOSED | Auto-unwind executed; exposure resolved |
-| EXPIRED | Unhedged beyond timeout (manual intervention timeout) |
+
+| Status           | Description                                      |
+|------------------|--------------------------------------------------|
+| PENDING          | Awaiting hedge; exposure not yet resolved        |
+| HEDGED           | Hedge successful; exposure resolved              |
+| EMERGENCY_CLOSED | Auto-unwind executed; exposure resolved          |
+| EXPIRED          | Unhedged beyond timeout (manual intervention timeout) |
 
 #### 3.7.7 Auto-Unwind
 
@@ -730,12 +732,12 @@ sim-exchange:
 
 ### 4.1 Tiered Consistency Strategy
 
-| Business Scenario | Consistency Requirement | Mechanism |
-|---|---|---|
-| Client order → risk check → acceptance | Strong consistency | Synchronous REST + local transaction |
-| Fill → position / credit / hedge | Eventual consistency + auditable | Outbox + Kafka + idempotent consumption |
-| Market data distribution | Tolerant of minor loss / reordering | Plain Kafka |
-| Quote push | Eventual consistency | At-Most-Once |
+| Business Scenario                      | Consistency Requirement              | Mechanism                                      |
+|----------------------------------------|--------------------------------------|------------------------------------------------|
+| Client order → risk check → acceptance | Strong consistency                   | Synchronous REST + local transaction           |
+| Fill → position / credit / hedge       | Eventual consistency + auditable     | Outbox + Kafka + idempotent consumption        |
+| Market data distribution               | Tolerant of minor loss / reordering  | Plain Kafka                                    |
+| Quote push                             | Eventual consistency                 | At-Most-Once                                   |
 
 ### 4.2 Transactional Outbox Pattern
 
