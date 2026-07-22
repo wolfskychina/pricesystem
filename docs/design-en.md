@@ -671,12 +671,54 @@ This simulation system accordingly implements: communication between sim-exchang
 
 **Async Two-Phase Matching Flow**:
 ```
+0. EMS startup → sim-exchange: POST /exchange/callbacks/register
+   - Registers EMS Webhook URLs for order status reports and trade fill notifications
+   - sim-exchange stores the callback endpoints for later async pushes
+
 1. EMS → sim-exchange: POST /exchange/orders (submit order)
 2. sim-exchange: Parameter validation → pass: insert into order table (status=NEW) → synchronously return order object
 3. sim-exchange: Async matching thread matches after N ms delay
    - Update order status to ACCEPTED → FILLED/PARTIALLY_FILLED/REJECTED
 4. sim-exchange → EMS: POST {ems_webhook}/execution/callback/order (order status report, emulating OnRtnOrder)
 5. sim-exchange → EMS: POST {ems_webhook}/execution/callback/trade (fill notification, emulating OnRtnTrade)
+```
+
+**Sequence Diagram**:
+```
+        EMS                                sim-exchange
+        │                                       │
+        │  1. POST /exchange/callbacks/register │
+        │ ────────────────────────────────────► │
+        │      {orderCallbackUrl, tradeCallbackUrl}
+        │                                       │
+        │◄──────────────────────────────────────│
+        │           200 OK (registered)         │
+        │                                       │
+        │              [ Startup complete ]     │
+        │                                       │
+        │  2. POST /exchange/orders             │
+        │ ────────────────────────────────────► │
+        │                                       │
+        │     3. Synchronously validates order  │
+        │     inserts order (status=NEW)        │
+        │                                       │
+        │◄──────────────────────────────────────│
+        │       200 OK {orderId, status=NEW}    │
+        │                                       │
+        │              [ Async matching ]       │
+        │                                       │
+        │◄──────────────────────────────────────│
+        │  4. POST /execution/callback/order    │
+        │     {orderId, status=FILLED}          │
+        │                                       │
+        │  200 OK ───────────────────────────►  │
+        │                                       │
+        │◄──────────────────────────────────────│
+        │  5. POST /execution/callback/trade    │
+        │     {orderId, fillQty, fillPrice}     │
+        │                                       │
+        │  200 OK ───────────────────────────►  │
+        │                                       │
 ```
 
 **Semantic Alignment with Real Exchanges**:

@@ -612,14 +612,14 @@ GET  /execution/hedge-metrics               // 监控指标
 - 交易所信息、交易日历
 - REST 查询
 
-### 3.9 notify-service（推送服务）
+### 3.10 notify-service（推送服务）
 - 订阅 Kafka 多主题（trade-event / hedge-fill-event）
 - WebSocket 推送给连接的客户，支持按 customerId + type 双重过滤订阅
 - 会话注册表模式：ConcurrentHashMap + CopyOnWriteArraySet 维护连接与订阅关系
 - REST: `GET /notify/health`、`GET /notify/stats`
 - 端口 8087
 
-### 3.10 reconciliation-service（对账服务）
+### 3.11 reconciliation-service（对账服务）
 - 定时（@Scheduled cron，默认每 5 分钟）跨服务对账
 - 三维度对账：
   - **敞口对账**：遍历每个 symbol 的净敞口，|netExposure| > threshold 则记录不一致
@@ -630,7 +630,7 @@ GET  /execution/hedge-metrics               // 监控指标
 - REST: `GET /reconciliation/last`（最近结果）、`POST /reconciliation/trigger`（手动触发）、`GET /reconciliation/health`
 - 端口 8089
 
-### 3.11 sim-exchange（模拟期货交易所）
+### 3.12 sim-exchange（模拟期货交易所）
 
 【参考来源：**几何布朗运动（GBM）模型**】— 金融数学中描述资产价格随时间波动的经典随机过程，是 Black-Scholes 期权定价模型的基础假设。真实市场中股票、期货等资产的价格走势大致符合对数正态分布，GBM 模型通过漂移率（μ）和波动率（σ）两个参数来刻画价格的长期趋势和短期波动幅度，生成的行情比简单随机游走更接近真实市场。
 
@@ -653,12 +653,54 @@ GET  /execution/hedge-metrics               // 监控指标
 
 **异步两阶段撮合流程**：
 ```
+0. EMS 启动 → sim-exchange: POST /exchange/callbacks/register
+   - 注册订单状态回报与成交通知的 Webhook 回调地址
+   - sim-exchange 保存回调端点，供后续异步推送使用
+
 1. EMS → sim-exchange: POST /exchange/orders（下单）
 2. sim-exchange: 参数校验 → 通过则入订单表(状态=NEW) → 同步返回订单对象
 3. sim-exchange: 异步撮合线程延迟 N ms 后撮合
    - 更新订单状态为 ACCEPTED → FILLED/PARTIALLY_FILLED/REJECTED
 4. sim-exchange → EMS: POST {ems_webhook}/execution/callback/order（订单状态回报，模拟 OnRtnOrder）
 5. sim-exchange → EMS: POST {ems_webhook}/execution/callback/trade（成交通知，模拟 OnRtnTrade）
+```
+
+**时序图**：
+```
+        EMS                                sim-exchange
+        │                                       │
+        │  1. POST /exchange/callbacks/register │
+        │ ────────────────────────────────────► │
+        │      {orderCallbackUrl, tradeCallbackUrl}
+        │                                       │
+        │◄──────────────────────────────────────│
+        │           200 OK (已注册)              │
+        │                                       │
+        │              【启动完成】              │
+        │                                       │
+        │  2. POST /exchange/orders             │
+        │ ────────────────────────────────────► │
+        │                                       │
+        │     3. 同步校验订单并写入订单表        │
+        │        (status=NEW)                   │
+        │                                       │
+        │◄──────────────────────────────────────│
+        │       200 OK {orderId, status=NEW}    │
+        │                                       │
+        │              【异步撮合】              │
+        │                                       │
+        │◄──────────────────────────────────────│
+        │  4. POST /execution/callback/order    │
+        │     {orderId, status=FILLED}          │
+        │                                       │
+        │  200 OK ───────────────────────────►  │
+        │                                       │
+        │◄──────────────────────────────────────│
+        │  5. POST /execution/callback/trade    │
+        │     {orderId, fillQty, fillPrice}     │
+        │                                       │
+        │  200 OK ───────────────────────────►  │
+        │                                       │
 ```
 
 **与真实交易所的语义对齐**：
@@ -700,8 +742,10 @@ sim-exchange:
   intervalMs: 1000  # 行情推送间隔
 ```
 
-### 3.12 前端：报价监控面板
-- **最简实现**：单页 HTML + JavaScript（或 Vue 最简版）
+
+### 3.13 frontend（前端：报价监控面板）
+
+- **最简实现**：单页 HTML + JavaScript（或轻量 Vue）
 - 功能：实时展示交易所报价 + 做市商报价表格
 - 可调刷新频率（1s / 5s / 10s / 30s）
 - 数据来源：REST 轮询或 WebSocket 推送
