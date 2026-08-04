@@ -1487,7 +1487,7 @@ CREATE TABLE hedge_position (
 - reconciliation-service: added hedge failure exposure reconciliation dimension
 - Database: 2 new tables, 2 modified tables
 
-### 2026-07-20 — Hedge Batching Upgrade: Net Exposure Netting
+### 2026-08-04 — Hedge Batching Upgrade: Net Exposure Netting
 
 **Rationale:**
 - Original batching grouped by `symbol + side`; BUY and SELL directions used separate buckets. A client buy of 5 lots and a client sell of 3 lots would produce two independent hedge orders (BUY 5 + SELL 3) instead of a single net BUY 2

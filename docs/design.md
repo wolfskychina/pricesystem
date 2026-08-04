@@ -1467,7 +1467,7 @@ CREATE TABLE hedge_position (
 - reconciliation-service：新增对冲失败敞口对账维度
 - 数据库：新增 2 张表，修改 2 张表
 
-### 2026-07-20 — 对冲聚合升级：净额对冲（Net Exposure Netting）
+### 2026-08-04 — 对冲聚合升级：净额对冲（Net Exposure Netting）
 
 **变更原因：**
 - 原对冲聚合按 `symbol + side` 分组，BUY 和 SELL 方向分别建桶，客户买入5手和卖出3手会产生两笔独立对冲单（BUY 5 + SELL 3），而非净额2手一笔
