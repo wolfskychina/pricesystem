@@ -204,30 +204,53 @@
 
 **数据表**：hedge_orders（对冲订单）、hedge_trades（对冲成交流水）、hedge_batch_items（聚合子项）
 
-**对冲聚合（Hedge Batching）**：
-短时间内同合约、同方向的多笔客户成交合并为一笔对冲单提交交易所，减少订单数量、降低手续费与市场冲击成本。
-- 聚合粒度：按 `symbol + side` 分组（同一合约同一对冲方向合并）
+**对冲聚合与净额对冲（Hedge Batching with Net Exposure Netting）**：
+短时间内同合约的多笔客户成交合并处理，**先对冲同合约的反向成交进行净额相消，再对净敞口提交对冲单**，最大限度减少交易所订单数量、手续费与市场冲击成本。
+- 聚合粒度：按 `symbol` 分组（同一合约的 BUY 和 SELL 对冲方向合并到同一桶）
+- **净额计算**：出桶时计算净敞口 = sum(BUY 方向 qty) − sum(SELL 方向 qty)
+  - 净敞口 > 0：提交一笔 BUY 对冲单，数量 = 净敞口
+  - 净敞口 < 0：提交一笔 SELL 对冲单，数量 = |净敞口|
+  - 净敞口 = 0：完全内部相消，不提交交易所订单，所有子项标记为 INTERNALLY_NETTED
 - 双触发机制：
   - **时间窗口**：每 `batching-window-ms` 毫秒定时出桶（开发环境 1000ms，生产环境建议 200ms）
-  - **数量阈值**：单桶累计数量 ≥ `batching-size-threshold`（默认 50 手）立即出桶
-- 分摊规则（市价单）：所有子项成交价相同，按数量比例分摊，最后一项吸收尾差
-- 事件发布：聚合订单成交后，按原始成交笔数逐笔发布 hedge-fill-event（position-service 消费模型不变）
+  - **净敞口阈值**：桶内 |净敞口| ≥ `batching-size-threshold`（默认 50 手）立即出桶
+- 分摊规则（市价单）：所有子项按 `fillRatio = 实际成交量 / |净敞口|` 分摊，每子项成交价 = 交易所成交价，最后一项吸收尾差
+- 事件发布：对冲成交后，按原始成交笔数逐笔发布 hedge-fill-event（BUY 子项发 BUY 事件，SELL 子项发 SELL 事件，position-service 消费模型不变）
+- 完全相消场景（net=0）：不提交交易所订单，不发布 hedge-fill-event（客户持仓已自行相消，无需对冲）
 - 可配置开关：`execution.batching-enabled`，关闭时回退为一笔成交一笔对冲
+
+**净额对冲示例**：
+```
+客户A 买入 AU2406 5手 → 对冲方向 BUY 5手
+客户B 卖出 AU2406 3手 → 对冲方向 SELL 3手
+                    ↓ 出桶时净额计算
+净敞口 = 5 - 3 = 2手 BUY
+                    ↓ 仅向交易所提交1笔
+BUY 2手 AU2406（而非分别 BUY 5 + SELL 3 = 2笔）
+                    ↓ 交易所成交回报 2手 @520.50
+fillRatio = 2 / |2| = 1.0（全额成交）
+BUY子项分摊：5手 @520.50 → 发布5手 BUY hedge-fill-event
+SELL子项分摊：3手 @520.50 → 发布3手 SELL hedge-fill-event
+净效果 = +5 - 3 = +2（与交易所成交量一致）
+```
 
 **对冲聚合数据流**：
 ```
 trade-event → HedgeBatcher.enqueue
   ├─ batchingEnabled=false → ExecutionService.onTradeEventImmediate（单笔立即对冲）
-  └─ batchingEnabled=true  → 入桶（hedge_batch_items 状态=PENDING）
+  └─ batchingEnabled=true  → 入桶（hedge_batch_items 状态=PENDING，桶键=symbol）
        ├─ 时间窗口触发（@Scheduled fixedDelay）
-       └─ 数量阈值触发（入桶时检查）
-            → ExecutionService.submitBatchedOrder（聚合提交）
+       └─ |净敞口| 阈值触发（入桶时检查）
+            → ExecutionService.submitBatchedOrder（净额提交）
+                 ├─ netQty > 0：BUY netQty → 提交交易所
+                 ├─ netQty < 0：SELL |netQty| → 提交交易所
+                 └─ netQty = 0：内部相消，不提交交易所，子项标记 INTERNALLY_NETTED
                  → hedge_orders.isBatched=1 + 子项状态=SUBMITTED
-                 → ExchangeSessionClient.submitOrder（同步受理）
+                 → ExchangeSessionClient.submitOrder（仅 netQty≠0 时，同步受理）
                  → sim-exchange 异步撮合
                       → Webhook /execution/callback/trade
                            → ExecutionService.onTradeNotification
-                                → 按子项数量比例分摊
+                                → 按 fillRatio 分摊（BUY/SELL 子项各自分摊）
                                 → 逐笔发布 hedge-fill-event（每原始成交1条）
 ```
 
@@ -1443,3 +1466,25 @@ CREATE TABLE hedge_position (
 - oms-service：集成预对冲评估调用
 - reconciliation-service：新增对冲失败敞口对账维度
 - 数据库：新增 2 张表，修改 2 张表
+
+### 2026-07-20 — 对冲聚合升级：净额对冲（Net Exposure Netting）
+
+**变更原因：**
+- 原对冲聚合按 `symbol + side` 分组，BUY 和 SELL 方向分别建桶，客户买入5手和卖出3手会产生两笔独立对冲单（BUY 5 + SELL 3），而非净额2手一笔
+- 行业实践中做市商会对同合约反向成交进行净额相消，只对净敞口下对冲单，减少手续费和市场冲击
+
+**变更内容：**
+- 聚合桶键从 `symbol:side` 改为 `symbol`，同合约的 BUY/SELL 对冲方向合并到同一桶
+- 出桶时计算净敞口 `netQty = sum(BUY qty) - sum(SELL qty)`：
+  - net > 0：仅提交一笔 BUY 对冲单
+  - net < 0：仅提交一笔 SELL 对冲单
+  - net = 0：完全内部相消，不提交交易所订单
+- 阈值触发改为基于 |净敞口|，而非单方向总量
+- 成交分摊改为按 `fillRatio = fillQty / |netQty|` 分摊，BUY/SELL 子项各自分摊
+- hedge_batch_items 表新增 `netted` 字段（0=交易所对冲，1=内部相消）
+- 完全相消（net=0）场景：子项标记 INTERNALLY_NETTED，不发布 hedge-fill-event
+
+**影响：**
+- 减少 50%+ 的交易所对冲订单（当买卖双向成交均衡时）
+- 节省手续费，降低市场冲击
+- position-service 消费模型不变（sum(BUY events) - sum(SELL events) = netQty = 交易所成交量）

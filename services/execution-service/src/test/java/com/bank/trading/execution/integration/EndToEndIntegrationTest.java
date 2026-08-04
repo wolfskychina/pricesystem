@@ -135,19 +135,19 @@ class EndToEndIntegrationTest {
     // ==================== 端到端测试场景 ====================
 
     @Test
-    @DisplayName("E2E-1: 聚合对冲完整链路 - 3笔客户买入 → 1笔聚合对冲卖出 → 异步成交 → 3条hedge-fill-event")
+    @DisplayName("E2E-1: 聚合对冲完整链路 - 3笔客户买入 → 1笔聚合对冲买入 → 异步成交 → 3条hedge-fill-event")
     void endToEnd_batchedHedgeFlow_threeCustomerBuys() throws Exception {
-        // 1. 模拟 3 笔客户买入成交，入桶
+        // 1. 模拟 3 笔客户买入成交，入桶（净额对冲：按 symbol 分桶，BUY 和 SELL 合并）
         hedgeBatcher.enqueue(buildTradeEvent("T-E2E-1", "AU2406", "BUY", new BigDecimal("5")));
         hedgeBatcher.enqueue(buildTradeEvent("T-E2E-2", "AU2406", "BUY", new BigDecimal("3")));
         hedgeBatcher.enqueue(buildTradeEvent("T-E2E-3", "AU2406", "BUY", new BigDecimal("2")));
 
-        // 验证入桶成功
-        assertEquals(3, hedgeBatcher.getBucketSize("AU2406", "BUY"), "3笔应入同一桶（对冲BUY）");
+        // 验证入桶成功（净额对冲：同 symbol 同方向入同一桶）
+        assertEquals(3, hedgeBatcher.getBucketSize("AU2406"), "3笔应入同一桶（按 symbol 分桶）");
         assertEquals(0, hedgeOrderMapper.orders.size(), "入桶阶段不应创建对冲订单");
 
-        // 2. 手动触发出桶，提交聚合对冲单
-        hedgeBatcher.flushBucket("AU2406:BUY");
+        // 2. 手动触发出桶，提交净额对冲单（同方向无相消，净敞口=10）
+        hedgeBatcher.flushBucket("AU2406");
 
         // 3. 验证聚合对冲订单已提交到交易所（同步受理阶段）
         assertEquals(1, hedgeOrderMapper.orders.size(), "出桶应创建1笔聚合对冲订单");
@@ -262,31 +262,71 @@ class EndToEndIntegrationTest {
     }
 
     @Test
-    @DisplayName("E2E-4: 不同方向分桶 - 客户买卖同时成交，分别对冲")
-    void endToEnd_oppositeDirections_separateBuckets() throws Exception {
+    @DisplayName("E2E-4: 净额对冲 - 客户买卖同时成交，净额相消后仅提交1笔对冲单")
+    void endToEnd_netExposureNetting_oppositeDirections() throws Exception {
+        // 客户A 买入 5 手 → 对冲 BUY 5
+        // 客户B 卖出 3 手 → 对冲 SELL 3
+        // 净额对冲：净敞口 = 5 - 3 = 2 手 BUY，仅提交1笔 BUY 2 手对冲单
         hedgeBatcher.enqueue(buildTradeEvent("T-BUY", "AU2406", "BUY", new BigDecimal("5")));
         hedgeBatcher.enqueue(buildTradeEvent("T-SELL", "AU2406", "SELL", new BigDecimal("3")));
 
-        // 验证分桶
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "BUY"), "BUY客户→BUY对冲桶");
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "SELL"), "SELL客户→SELL对冲桶");
+        // 验证：BUY 和 SELL 合并到同一桶（净额对冲）
+        assertEquals(2, hedgeBatcher.getBucketSize("AU2406"), "BUY和SELL应入同一桶（净额对冲）");
+        assertEquals(1, hedgeBatcher.getActiveBucketCount(), "应只有1个活跃桶");
+        assertEquals(0, hedgeOrderMapper.orders.size(), "未达阈值不应出桶");
 
-        // 分别出桶
-        hedgeBatcher.flushBucket("AU2406:BUY");
-        hedgeBatcher.flushBucket("AU2406:SELL");
+        // 出桶：净额计算后仅提交1笔对冲单
+        hedgeBatcher.flushBucket("AU2406");
 
-        assertEquals(2, hedgeOrderMapper.orders.size(), "应创建2笔对冲订单（不同方向）");
-        long sellCount = hedgeOrderMapper.orders.stream()
-                .filter(o -> "SELL".equals(o.getSide())).count();
-        long buyCount = hedgeOrderMapper.orders.stream()
-                .filter(o -> "BUY".equals(o.getSide())).count();
-        assertEquals(1, sellCount, "1笔对冲SELL");
-        assertEquals(1, buyCount, "1笔对冲BUY");
+        assertEquals(1, hedgeOrderMapper.orders.size(), "净额对冲应只创建1笔对冲订单");
+        HedgeOrder nettedOrder = hedgeOrderMapper.orders.get(0);
+        assertEquals("BUY", nettedOrder.getSide(), "净敞口=5-3=2>0 → BUY");
+        assertDecimalEquals(new BigDecimal("2.0000"), nettedOrder.getQty(), "净量=2手");
+        assertEquals(2, nettedOrder.getBatchItemCount(), "应包含2个子项");
+        assertEquals("SUBMITTED", nettedOrder.getStatus());
 
-        awaitOrderFilledAndEvents(hedgeOrderMapper.orders.get(0).getHedgeOrderId(), 1, 2000);
-        awaitOrderFilledAndEvents(hedgeOrderMapper.orders.get(1).getHedgeOrderId(), 2, 2000);
+        // 等待异步撮合完成，应发2条 hedge-fill-event（每子项1条）
+        awaitOrderFilledAndEvents(nettedOrder.getHedgeOrderId(), 2, 2000);
 
-        assertEquals(2, kafkaTemplate.sentMessages.size(), "应发2条事件");
+        // 验证子项分摊：BUY 子项和 SELL 子项各自分摊，总和=净成交量=2
+        List<HedgeBatchItem> items = batchItemMapper.findByHedgeOrderId(nettedOrder.getHedgeOrderId());
+        assertEquals(2, items.size());
+        for (HedgeBatchItem item : items) {
+            assertEquals("FILLED", item.getStatus());
+            assertTrue(item.getFilledQty().compareTo(BigDecimal.ZERO) > 0,
+                    "子项成交量应大于0: " + item.getFilledQty());
+        }
+
+        assertEquals(2, kafkaTemplate.sentMessages.size(), "应发2条事件（每子项1条）");
+        for (CapturingKafkaTemplate.SentMessage msg : kafkaTemplate.sentMessages) {
+            assertEquals("hedge-fill-event", msg.topic);
+            assertEquals("AU2406", msg.key);
+        }
+    }
+
+    @Test
+    @DisplayName("E2E-5: 净额完全相消 - BUY 5 + SELL 5 → 不提交交易所，内部相消")
+    void endToEnd_fullNetting_noExchangeOrder() throws Exception {
+        hedgeBatcher.enqueue(buildTradeEvent("T-BUY-5", "AU2406", "BUY", new BigDecimal("5")));
+        hedgeBatcher.enqueue(buildTradeEvent("T-SELL-5", "AU2406", "SELL", new BigDecimal("5")));
+
+        assertEquals(2, hedgeBatcher.getBucketSize("AU2406"));
+
+        hedgeBatcher.flushBucket("AU2406");
+
+        assertEquals(1, hedgeOrderMapper.orders.size(), "应创建1条对冲订单记录（用于审计）");
+        HedgeOrder order = hedgeOrderMapper.orders.get(0);
+        assertEquals("INTERNALLY_NETTED", order.getStatus(), "净敞口=0，状态应为内部相消");
+        assertNull(order.getExchangeOrderId(), "不应有交易所订单ID");
+
+        // 验证子项状态
+        for (HedgeBatchItem item : batchItemMapper.items) {
+            assertEquals("INTERNALLY_NETTED", item.getStatus());
+            assertEquals(1, item.getNetted(), "netted标志应为1");
+        }
+
+        // 完全相消不发事件、不提交交易所
+        assertEquals(0, kafkaTemplate.sentMessages.size(), "完全相消不应发hedge-fill-event");
     }
 
     // ==================== 辅助方法 ====================
@@ -539,6 +579,23 @@ class EndToEndIntegrationTest {
                     existing.setAvgPrice(order.getAvgPrice());
                     existing.setUpdatedAt(order.getUpdatedAt());
                     return 1;
+                }
+            }
+            // Fallback: lookup by hedgeOrderId (for cases where exchangeOrderId was just set
+            // on the local object but not yet persisted in the list)
+            if (order.getHedgeOrderId() != null) {
+                for (int i = 0; i < orders.size(); i++) {
+                    if (order.getHedgeOrderId().equals(orders.get(i).getHedgeOrderId())) {
+                        HedgeOrder existing = orders.get(i);
+                        existing.setStatus(order.getStatus());
+                        existing.setFilledQty(order.getFilledQty());
+                        existing.setAvgPrice(order.getAvgPrice());
+                        existing.setUpdatedAt(order.getUpdatedAt());
+                        if (order.getExchangeOrderId() != null) {
+                            existing.setExchangeOrderId(order.getExchangeOrderId());
+                        }
+                        return 1;
+                    }
                 }
             }
             return 0;

@@ -174,18 +174,18 @@ public class ExecutionService {
     }
 
     /**
-     * 提交聚合对冲单（batching 开启时由 HedgeBatcher 调用）。
+     * 提交聚合对冲单（batching 开启时由 HedgeBatcher 调用）— 支持净额对冲。
      * <p>
      * 业务流程：
      * <ol>
-     *   <li>汇总所有子项的对冲数量，计算总量</li>
-     *   <li>构造聚合对冲订单（isBatched=1，batchItemCount=子项数），持久化</li>
-     *   <li>更新所有子项状态为 SUBMITTED，并关联 hedgeOrderId</li>
-     *   <li>调用交易所提交聚合对冲单</li>
-     *   <li>更新聚合对冲订单的 exchangeOrderId</li>
+     *   <li>计算净敞口：netQty = sum(BUY qty) - sum(SELL qty)</li>
+     *   <li>netQty > 0：构造 BUY 对冲单，提交交易所</li>
+     *   <li>netQty < 0：构造 SELL 对冲单，提交交易所</li>
+     *   <li>netQty = 0：完全内部相消，不提交交易所，子项标记 INTERNALLY_NETTED</li>
+     *   <li>更新所有子项状态为 SUBMITTED（或 INTERNALLY_NETTED），关联 hedgeOrderId</li>
      * </ol>
      *
-     * @param items 聚合子项列表（同 symbol + 同 side）
+     * @param items 聚合子项列表（同 symbol，可含 BUY 和 SELL 两个方向）
      */
     @Transactional
     public void submitBatchedOrder(List<HedgeBatchItem> items) {
@@ -194,42 +194,75 @@ public class ExecutionService {
         }
 
         String symbol = items.get(0).getSymbol();
-        String side = items.get(0).getSide();
-        BigDecimal totalQty = items.stream()
-                .map(HedgeBatchItem::getQty)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        log.info("Submitting batched hedge order: symbol={}, side={}, itemCount={}, totalQty={}",
-                symbol, side, items.size(), totalQty);
+        // 计算净敞口：netQty = sum(BUY qty) - sum(SELL qty)
+        BigDecimal buyTotal = BigDecimal.ZERO;
+        BigDecimal sellTotal = BigDecimal.ZERO;
+        for (HedgeBatchItem item : items) {
+            if ("BUY".equals(item.getSide())) {
+                buyTotal = buyTotal.add(item.getQty());
+            } else {
+                sellTotal = sellTotal.add(item.getQty());
+            }
+        }
+        BigDecimal netQty = buyTotal.subtract(sellTotal);
+        BigDecimal absNet = netQty.abs();
 
-        // 1. 构造聚合对冲订单
+        log.info("Submitting batched hedge order with netting: symbol={}, itemCount={}, " +
+                        "buyTotal={}, sellTotal={}, netQty={}",
+                symbol, items.size(), buyTotal, sellTotal, netQty);
+
+        // 构造聚合对冲订单（即使 net=0 也创建记录，用于审计追溯）
         HedgeOrder hedgeOrder = new HedgeOrder();
         hedgeOrder.setId(idGenerator.nextLongId());
         hedgeOrder.setHedgeOrderId(UUID.randomUUID().toString().replace("-", ""));
         hedgeOrder.setSymbol(symbol);
-        hedgeOrder.setSide(side);
         hedgeOrder.setType(hedgeOrderType);
-        hedgeOrder.setQty(totalQty);
+        hedgeOrder.setQty(absNet);
         hedgeOrder.setFilledQty(BigDecimal.ZERO);
         hedgeOrder.setAvgPrice(BigDecimal.ZERO);
-        hedgeOrder.setStatus("NEW");
         hedgeOrder.setIsBatched(1);
         hedgeOrder.setBatchItemCount(items.size());
         long now = System.currentTimeMillis();
         hedgeOrder.setCreatedAt(now);
         hedgeOrder.setUpdatedAt(now);
+
+        if (netQty.compareTo(BigDecimal.ZERO) == 0) {
+            // 净敞口为0：完全内部相消，不提交交易所
+            hedgeOrder.setSide("BUY"); // 占位方向，无实际意义
+            hedgeOrder.setStatus("INTERNALLY_NETTED");
+            hedgeOrderMapper.insert(hedgeOrder);
+
+            for (HedgeBatchItem item : items) {
+                item.setHedgeOrderId(hedgeOrder.getHedgeOrderId());
+                item.setStatus("INTERNALLY_NETTED");
+                item.setNetted(1);
+                item.setUpdatedAt(System.currentTimeMillis());
+                batchItemMapper.update(item);
+            }
+
+            log.info("Batch fully internally netted, no exchange order: symbol={}, itemCount={}, hedgeOrderId={}",
+                    symbol, items.size(), hedgeOrder.getHedgeOrderId());
+            return;
+        }
+
+        // 净敞口非0：确定对冲方向并提交交易所
+        String hedgeSide = netQty.compareTo(BigDecimal.ZERO) > 0 ? "BUY" : "SELL";
+        hedgeOrder.setSide(hedgeSide);
+        hedgeOrder.setStatus("NEW");
         hedgeOrderMapper.insert(hedgeOrder);
 
-        // 2. 更新所有子项：状态=SUBMITTED，关联 hedgeOrderId
+        // 更新所有子项：状态=SUBMITTED，关联 hedgeOrderId
         for (HedgeBatchItem item : items) {
             item.setHedgeOrderId(hedgeOrder.getHedgeOrderId());
             item.setStatus("SUBMITTED");
+            item.setNetted(0);
             item.setUpdatedAt(System.currentTimeMillis());
             batchItemMapper.update(item);
         }
 
-        // 3. 向交易所提交聚合对冲单
-        submitOrderToExchange(hedgeOrder, totalQty);
+        // 向交易所提交净额对冲单
+        submitOrderToExchange(hedgeOrder, absNet);
     }
 
     /**
@@ -408,11 +441,12 @@ public class ExecutionService {
     /**
      * 聚合订单成交后，按子项分摊成交结果，逐笔发布 hedge-fill-event。
      * <p>
-     * 分摊规则（市价单）：
+     * 净额对冲分摊规则（市价单）：
      * <ul>
+     *   <li>fillRatio = 实际成交量 / |净敞口|</li>
+     *   <li>每子项 filledQty = 子项 qty × fillRatio（BUY/SELL 子项各自分摊）</li>
      *   <li>所有子项成交价相同（= 聚合对冲单成交价）</li>
-     *   <li>每子项 filledQty = 子项 qty（市价单全部成交）</li>
-     *   <li>最后一项吸收尾差，确保 sum(filledQty) = 总成交数量</li>
+     *   <li>最后一项吸收尾差，确保 sum(BUY fills) - sum(SELL fills) = 实际成交量 × sign(netQty)</li>
      * </ul>
      *
      * @param hedgeOrder 聚合对冲订单
@@ -427,26 +461,41 @@ public class ExecutionService {
 
         BigDecimal totalFillQty = hedgeTrade.getQty();
         BigDecimal fillPrice = hedgeTrade.getPrice();
-        BigDecimal totalItemQty = items.stream()
-                .map(HedgeBatchItem::getQty)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        // 净敞口 = hedgeOrder.getQty()（聚合时已计算并存储）
+        BigDecimal absNetQty = hedgeOrder.getQty();
+        // 净敞口方向：BUY=+1，SELL=-1
+        int netSign = "BUY".equals(hedgeOrder.getSide()) ? 1 : -1;
 
-        log.info("Allocating batched hedge fill: hedgeOrderId={}, itemCount={}, totalFillQty={}, fillPrice={}",
-                hedgeOrder.getHedgeOrderId(), items.size(), totalFillQty, fillPrice);
+        log.info("Allocating batched hedge fill with netting: hedgeOrderId={}, itemCount={}, " +
+                        "totalFillQty={}, fillPrice={}, absNetQty={}, netSide={}",
+                hedgeOrder.getHedgeOrderId(), items.size(), totalFillQty, fillPrice, absNetQty,
+                hedgeOrder.getSide());
 
-        BigDecimal allocatedSoFar = BigDecimal.ZERO;
+        // fillRatio = 实际成交量 / |净敞口|
+        BigDecimal fillRatio = absNetQty.compareTo(BigDecimal.ZERO) > 0
+                ? totalFillQty.divide(absNetQty, 8, RoundingMode.HALF_UP)
+                : BigDecimal.ZERO;
+
+        // 累计净分摊量（带符号：BUY 为正，SELL 为负）
+        BigDecimal netAllocated = BigDecimal.ZERO;
+
         for (int i = 0; i < items.size(); i++) {
             HedgeBatchItem item = items.get(i);
             BigDecimal itemFillQty;
+            int itemSign = "BUY".equals(item.getSide()) ? 1 : -1;
 
             if (i == items.size() - 1) {
-                // 最后一项吸收尾差
-                itemFillQty = totalFillQty.subtract(allocatedSoFar);
+                // 最后一项吸收尾差，确保 netAllocated + itemSign * itemFillQty = totalFillQty * netSign
+                // => itemFillQty = (totalFillQty * netSign - netAllocated) / itemSign
+                // => itemFillQty = (totalFillQty * netSign - netAllocated) * itemSign (因为 itemSign^2 = 1)
+                BigDecimal desiredNet = totalFillQty.multiply(BigDecimal.valueOf(netSign));
+                itemFillQty = desiredNet.subtract(netAllocated)
+                        .multiply(BigDecimal.valueOf(itemSign))
+                        .max(BigDecimal.ZERO); // 防止负数
             } else {
                 // 按比例分摊（保留4位小数）
-                itemFillQty = item.getQty().multiply(totalFillQty)
-                        .divide(totalItemQty, 4, RoundingMode.HALF_UP);
-                allocatedSoFar = allocatedSoFar.add(itemFillQty);
+                itemFillQty = item.getQty().multiply(fillRatio).setScale(4, RoundingMode.HALF_UP);
+                netAllocated = netAllocated.add(itemFillQty.multiply(BigDecimal.valueOf(itemSign)));
             }
 
             // 更新子项状态
@@ -456,7 +505,7 @@ public class ExecutionService {
             item.setUpdatedAt(System.currentTimeMillis());
             batchItemMapper.update(item);
 
-            // 发布单笔 hedge-fill-event（对应每笔原始客户成交）
+            // 发布单笔 hedge-fill-event（BUY 子项发 BUY 事件，SELL 子项发 SELL 事件）
             publishHedgeFillEventForItem(item, hedgeTrade);
         }
     }

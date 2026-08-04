@@ -210,30 +210,53 @@ Auxiliary services:
 
 **Database Tables**: hedge_orders (hedge orders), hedge_trades (hedge fill records), hedge_batch_items (batching child items)
 
-**Hedge Batching**:
-Multiple client fills for the same contract and direction within a short time window are aggregated into a single hedge order submitted to the exchange, reducing order count, transaction fees, and market impact.
-- Batching granularity: grouped by `symbol + side` (same contract, same hedge direction)
+**Hedge Batching with Net Exposure Netting**:
+Multiple client fills for the same contract within a short time window are aggregated, and **opposite-direction fills are netted before submitting a single hedge order for the net exposure**, minimizing exchange order count, transaction fees, and market impact.
+- Batching granularity: grouped by `symbol` (both BUY and SELL hedge directions for the same contract share one bucket)
+- **Net exposure calculation**: at flush time, compute netQty = sum(BUY qty) − sum(SELL qty)
+  - netQty > 0: submit a single BUY hedge order for netQty
+  - netQty < 0: submit a single SELL hedge order for |netQty|
+  - netQty = 0: fully internally offset; no exchange order; all items marked INTERNALLY_NETTED
 - Dual trigger mechanism:
   - **Time window**: flush every `batching-window-ms` milliseconds (1000ms in dev, recommended 200ms in production)
-  - **Quantity threshold**: flush immediately when accumulated quantity ≥ `batching-size-threshold` (default: 50 lots)
-- Allocation rule (market orders): all child items share the same fill price; allocated proportionally by quantity, with the last item absorbing the residual
-- Event publishing: after the batched order is filled, hedge-fill-events are published individually per original fill (position-service consumption model remains unchanged)
+  - **Net exposure threshold**: flush immediately when |netQty| ≥ `batching-size-threshold` (default: 50 lots)
+- Allocation rule (market orders): each child item is allocated at `fillRatio = fillQty / |netQty|`; fill price = exchange fill price; last item absorbs residual
+- Event publishing: after the hedge order is filled, hedge-fill-events are published per original fill (BUY items emit BUY events, SELL items emit SELL events; position-service consumption model remains unchanged)
+- Fully offset scenario (net=0): no exchange order submitted, no hedge-fill-event published (customer positions already offset each other; no hedge needed)
 - Configurable toggle: `execution.batching-enabled`; when disabled, falls back to one-hedge-per-fill
+
+**Net Exposure Netting Example**:
+```
+Customer A buys AU2406 5 lots → hedge direction BUY 5
+Customer B sells AU2406 3 lots → hedge direction SELL 3
+                    ↓ net calculation at flush time
+Net exposure = 5 - 3 = 2 lots BUY
+                    ↓ only 1 order submitted to exchange
+BUY 2 lots AU2406 (instead of separate BUY 5 + SELL 3 = 2 orders)
+                    ↓ exchange fill: 2 lots @520.50
+fillRatio = 2 / |2| = 1.0 (fully filled)
+BUY items allocated: 5 lots @520.50 → publish 5-lot BUY hedge-fill-event
+SELL items allocated: 3 lots @520.50 → publish 3-lot SELL hedge-fill-event
+Net effect = +5 - 3 = +2 (matches exchange fill quantity)
+```
 
 **Hedge Batching Data Flow**:
 ```
 trade-event → HedgeBatcher.enqueue
   ├─ batchingEnabled=false → ExecutionService.onTradeEventImmediate (immediate single hedge)
-  └─ batchingEnabled=true  → Enqueue (hedge_batch_items status=PENDING)
+  └─ batchingEnabled=true  → Enqueue (hedge_batch_items status=PENDING, bucket key=symbol)
        ├─ Time window trigger (@Scheduled fixedDelay)
-       └─ Quantity threshold trigger (checked on enqueue)
-            → ExecutionService.submitBatchedOrder (aggregated submission)
+       └─ |netQty| threshold trigger (checked on enqueue)
+            → ExecutionService.submitBatchedOrder (netted submission)
+                 ├─ netQty > 0: BUY netQty → submit to exchange
+                 ├─ netQty < 0: SELL |netQty| → submit to exchange
+                 └─ netQty = 0: internal offset, no exchange order, items marked INTERNALLY_NETTED
                  → hedge_orders.isBatched=1 + child items status=SUBMITTED
-                 → ExchangeSessionClient.submitOrder (synchronous acceptance)
+                 → ExchangeSessionClient.submitOrder (only when netQty≠0, synchronous acceptance)
                  → sim-exchange async matching
                       → Webhook /execution/callback/trade
                            → ExecutionService.onTradeNotification
-                                → Proportional allocation by child item quantity
+                                → Allocate by fillRatio (BUY/SELL items allocated separately)
                                 → Publish hedge-fill-event per original fill
 ```
 
@@ -1463,3 +1486,25 @@ CREATE TABLE hedge_position (
 - oms-service: integrated pre-hedge assessment call
 - reconciliation-service: added hedge failure exposure reconciliation dimension
 - Database: 2 new tables, 2 modified tables
+
+### 2026-07-20 — Hedge Batching Upgrade: Net Exposure Netting
+
+**Rationale:**
+- Original batching grouped by `symbol + side`; BUY and SELL directions used separate buckets. A client buy of 5 lots and a client sell of 3 lots would produce two independent hedge orders (BUY 5 + SELL 3) instead of a single net BUY 2
+- Industry practice: market makers net opposite-direction fills for the same contract and only hedge the net exposure, reducing fees and market impact
+
+**Changes:**
+- Bucket key changed from `symbol:side` to `symbol`; BUY and SELL hedge directions for the same contract share one bucket
+- At flush time, compute net exposure `netQty = sum(BUY qty) - sum(SELL qty)`:
+  - net > 0: submit a single BUY hedge order
+  - net < 0: submit a single SELL hedge order
+  - net = 0: fully internally offset; no exchange order
+- Threshold trigger changed to |net exposure|, not per-direction gross
+- Fill allocation changed to `fillRatio = fillQty / |netQty|`; BUY/SELL items allocated separately
+- hedge_batch_items table: added `netted` column (0=exchange hedged, 1=internally offset)
+- Fully offset (net=0) scenario: items marked INTERNALLY_NETTED, no hedge-fill-event published
+
+**Impact:**
+- 50%+ reduction in exchange hedge orders (when buy/sell volumes are balanced)
+- Savings on transaction fees and reduced market impact
+- position-service consumption model unchanged (sum(BUY events) - sum(SELL events) = netQty = exchange fill quantity)

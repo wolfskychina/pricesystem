@@ -436,6 +436,23 @@ class ExecutionServiceTest {
                     return 1;
                 }
             }
+            // Fallback: lookup by hedgeOrderId (for cases where exchangeOrderId was just set
+            // on the local object but not yet persisted in the list)
+            if (order.getHedgeOrderId() != null) {
+                for (int i = 0; i < orders.size(); i++) {
+                    if (order.getHedgeOrderId().equals(orders.get(i).getHedgeOrderId())) {
+                        HedgeOrder existing = orders.get(i);
+                        existing.setStatus(order.getStatus());
+                        existing.setFilledQty(order.getFilledQty());
+                        existing.setAvgPrice(order.getAvgPrice());
+                        existing.setUpdatedAt(order.getUpdatedAt());
+                        if (order.getExchangeOrderId() != null) {
+                            existing.setExchangeOrderId(order.getExchangeOrderId());
+                        }
+                        return 1;
+                    }
+                }
+            }
             return 0;
         }
         @Override public List<HedgeOrder> findRecent(int limit) {

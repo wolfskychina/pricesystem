@@ -39,6 +39,8 @@ public class HedgeBatchItem {
     private BigDecimal filledQty;
     /** 分摊后的成交均价 */
     private BigDecimal avgPrice;
+    /** 是否内部相消（0=交易所对冲，1=内部相消，净敞口为0未提交交易所） */
+    private Integer netted;
     /** 重试次数 */
     private Integer retryCount;
     /** 失败原因 */
@@ -50,6 +52,8 @@ public class HedgeBatchItem {
 
     public Integer getRetryCount() { return retryCount; }
     public void setRetryCount(Integer retryCount) { this.retryCount = retryCount; }
+    public Integer getNetted() { return netted; }
+    public void setNetted(Integer netted) { this.netted = netted; }
     public String getFailureReason() { return failureReason; }
     public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
 

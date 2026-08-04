@@ -1,6 +1,5 @@
 package com.bank.trading.execution.service;
 
-import com.bank.trading.common.core.enums.OrderSide;
 import com.bank.trading.common.core.event.TradeEvent;
 import com.bank.trading.common.core.idgen.IdGenerator;
 import com.bank.trading.execution.entity.HedgeBatchItem;
@@ -18,17 +17,24 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 对冲聚合器（Hedge Batcher）。
+ * 对冲聚合器（Hedge Batcher）— 支持净额对冲（Net Exposure Netting）。
  * <p>
- * 将短时间内同合约、同方向的多笔客户成交聚合为一笔对冲单提交到交易所，
- * 以减少交易所订单数量、降低手续费与市场冲击成本。
+ * 将短时间内同合约的多笔客户成交聚合到同一桶中，出桶时对 BUY/SELL 反向成交进行
+ * 净额相消，仅对净敞口提交一笔对冲单到交易所，最大限度减少订单数量、手续费与市场冲击。
  * <p>
- * <b>聚合粒度</b>：按 {@code symbol + side} 分组，同一组内的所有子项合并为一笔对冲单。
+ * <b>聚合粒度</b>：按 {@code symbol} 分组（同一合约的 BUY 和 SELL 对冲方向合并到同一桶）。
+ * <p>
+ * <b>净额计算</b>：出桶时计算 netQty = sum(BUY qty) - sum(SELL qty)
+ * <ul>
+ *   <li>netQty > 0：提交一笔 BUY 对冲单，数量 = netQty</li>
+ *   <li>netQty < 0：提交一笔 SELL 对冲单，数量 = |netQty|</li>
+ *   <li>netQty = 0：完全内部相消，不提交交易所订单，子项标记为 INTERNALLY_NETTED</li>
+ * </ul>
  * <p>
  * <b>双触发机制</b>：
  * <ul>
  *   <li><b>时间触发</b>：每 {@code batching-window-ms} 毫秒定时出桶（默认 1000ms，开发环境）</li>
- *   <li><b>数量触发</b>：单桶累计数量 ≥ {@code batching-size-threshold} 立即出桶（默认 50 手）</li>
+ *   <li><b>净敞口阈值触发</b>：桶内 |净敞口| ≥ {@code batching-size-threshold} 立即出桶（默认 50 手）</li>
  * </ul>
  * 任一条件满足即触发出桶，交由 {@link ExecutionService#submitBatchedOrder} 提交交易所。
  * <p>
@@ -52,7 +58,7 @@ public class HedgeBatcher {
     @Value("${execution.batching-window-ms:1000}")
     private long batchingWindowMs;
 
-    /** 数量阈值（手），单桶累计数量超过此值立即出桶 */
+    /** 净敞口阈值（手），桶内 |净敞口| 超此值立即出桶 */
     @Value("${execution.batching-size-threshold:50}")
     private BigDecimal sizeThreshold;
 
@@ -62,8 +68,8 @@ public class HedgeBatcher {
 
     /**
      * 内存聚合桶。
-     * key = symbol + ":" + side（例如 "AU2406:BUY"）
-     * value = 该桶内的待出桶子项列表
+     * key = symbol（合约代码，BUY 和 SELL 方向合并到同一桶）
+     * value = 该桶内的待出桶子项列表（包含 BUY 和 SELL 两个方向）
      */
     private final ConcurrentHashMap<String, List<HedgeBatchItem>> buckets = new ConcurrentHashMap<>();
 
@@ -78,7 +84,7 @@ public class HedgeBatcher {
      * 将一笔客户成交加入聚合桶。
      * <p>
      * 若聚合未开启，直接调用 {@link ExecutionService#onTradeEventImmediate} 单笔对冲。
-     * 若已开启，入桶后检查数量阈值，达到则立即出桶。
+     * 若已开启，入桶后检查净敞口阈值，达到则立即出桶。
      *
      * @param event 客户成交事件
      * @return true=入桶成功（或单笔对冲成功），false=已存在（幂等跳过）
@@ -96,10 +102,11 @@ public class HedgeBatcher {
             return false;
         }
 
+        // 对冲方向 = 客户成交方向（客户 BUY → 做市商空头 → 对冲 BUY 平掉空头）
         String hedgeSide = calculateHedgeSide(event.getSide());
         BigDecimal hedgeQty = event.getQty().multiply(hedgeRatio).setScale(4, RoundingMode.HALF_UP);
 
-        // 构造子项并持久化（状态=PENDING）
+        // 构造子项并持久化（状态=PENDING，netted=0）
         HedgeBatchItem item = new HedgeBatchItem();
         item.setId(idGenerator.nextLongId());
         item.setOriginalTradeId(event.getTradeId());
@@ -110,19 +117,21 @@ public class HedgeBatcher {
         item.setStatus("PENDING");
         item.setFilledQty(BigDecimal.ZERO);
         item.setAvgPrice(BigDecimal.ZERO);
+        item.setNetted(0);
         long now = System.currentTimeMillis();
         item.setCreatedAt(now);
         item.setUpdatedAt(now);
         batchItemMapper.insert(item);
 
-        String bucketKey = buildBucketKey(event.getSymbol(), hedgeSide);
+        // 桶键 = symbol（BUY 和 SELL 合并到同一桶）
+        String bucketKey = event.getSymbol();
         buckets.computeIfAbsent(bucketKey, k -> new ArrayList<>()).add(item);
 
-        log.info("Trade enqueued to hedge bucket: tradeId={}, bucket={}, qty={}",
-                event.getTradeId(), bucketKey, hedgeQty);
+        log.info("Trade enqueued to hedge bucket: tradeId={}, bucket={}, side={}, qty={}",
+                event.getTradeId(), bucketKey, hedgeSide, hedgeQty);
 
-        // 检查数量阈值，达到则立即出桶
-        checkSizeThresholdAndFlush(bucketKey);
+        // 检查净敞口阈值，达到则立即出桶
+        checkNetExposureThresholdAndFlush(bucketKey);
 
         return true;
     }
@@ -130,7 +139,7 @@ public class HedgeBatcher {
     /**
      * 定时出桶：由 Spring Scheduler 按固定频率触发。
      * <p>
-     * 遍历所有桶，非空则出桶并提交交易所。
+     * 遍历所有桶，非空则出桶并提交交易所（含净额计算）。
      */
     @Scheduled(fixedDelayString = "${execution.batching-window-ms:1000}")
     public void flushAllBuckets() {
@@ -144,31 +153,53 @@ public class HedgeBatcher {
     }
 
     /**
-     * 检查指定桶的数量是否达到阈值，达到则立即出桶。
+     * 检查指定桶的净敞口是否达到阈值，达到则立即出桶。
+     * <p>
+     * 净敞口 = sum(BUY qty) - sum(SELL qty)，阈值判断基于 |净敞口|。
      *
-     * @param bucketKey 桶键（symbol:side）
+     * @param bucketKey 桶键（symbol）
      */
-    private void checkSizeThresholdAndFlush(String bucketKey) {
+    private void checkNetExposureThresholdAndFlush(String bucketKey) {
         List<HedgeBatchItem> bucket = buckets.get(bucketKey);
         if (bucket == null || bucket.isEmpty()) {
             return;
         }
 
-        BigDecimal totalQty = bucket.stream()
-                .map(HedgeBatchItem::getQty)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal netQty = computeNetExposure(bucket);
+        BigDecimal absNet = netQty.abs();
 
-        if (totalQty.compareTo(sizeThreshold) >= 0) {
-            log.info("Bucket size threshold reached, flushing immediately: bucket={}, totalQty={}, threshold={}",
-                    bucketKey, totalQty, sizeThreshold);
+        if (absNet.compareTo(sizeThreshold) >= 0) {
+            log.info("Net exposure threshold reached, flushing immediately: bucket={}, netQty={}, threshold={}",
+                    bucketKey, netQty, sizeThreshold);
             flushBucket(bucketKey);
         }
     }
 
     /**
-     * 出桶：将桶内所有子项合并为一笔对冲单提交交易所。
+     * 计算桶内净敞口 = sum(BUY qty) - sum(SELL qty)。
      *
-     * @param bucketKey 桶键（symbol:side）
+     * @param bucket 桶内子项列表
+     * @return 净敞口（正=净多头需BUY对冲，负=净空头需SELL对冲）
+     */
+    private BigDecimal computeNetExposure(List<HedgeBatchItem> bucket) {
+        BigDecimal buyTotal = BigDecimal.ZERO;
+        BigDecimal sellTotal = BigDecimal.ZERO;
+        for (HedgeBatchItem item : bucket) {
+            if ("BUY".equals(item.getSide())) {
+                buyTotal = buyTotal.add(item.getQty());
+            } else {
+                sellTotal = sellTotal.add(item.getQty());
+            }
+        }
+        return buyTotal.subtract(sellTotal);
+    }
+
+    /**
+     * 出桶：将桶内所有子项（含 BUY 和 SELL）合并，计算净敞口后提交对冲单。
+     * <p>
+     * 调用 {@link ExecutionService#submitBatchedOrder} 处理净额计算和交易所提交。
+     *
+     * @param bucketKey 桶键（symbol）
      */
     public synchronized void flushBucket(String bucketKey) {
         List<HedgeBatchItem> bucket = buckets.get(bucketKey);
@@ -203,25 +234,13 @@ public class HedgeBatcher {
     }
 
     /**
-     * 构建桶键（symbol:side）。
-     *
-     * @param symbol 合约
-     * @param side   方向
-     * @return 桶键
-     */
-    private String buildBucketKey(String symbol, String side) {
-        return symbol + ":" + side;
-    }
-
-    /**
      * 获取指定桶当前的子项数量（用于测试）。
      *
-     * @param symbol 合约
-     * @param side   对冲方向
+     * @param symbol 合约代码
      * @return 桶内子项数量
      */
-    public int getBucketSize(String symbol, String side) {
-        List<HedgeBatchItem> bucket = buckets.get(buildBucketKey(symbol, side));
+    public int getBucketSize(String symbol) {
+        List<HedgeBatchItem> bucket = buckets.get(symbol);
         return bucket == null ? 0 : bucket.size();
     }
 

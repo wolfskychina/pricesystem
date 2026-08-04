@@ -21,10 +21,10 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * HedgeBatcher 单元测试。
+ * HedgeBatcher 单元测试 — 含净额对冲（Net Exposure Netting）场景。
  * <p>
- * 覆盖：入桶幂等、时间窗口出桶、数量阈值出桶、不同合约/方向分桶、
- * batching 关闭时直通单笔对冲。
+ * 覆盖：入桶幂等、时间窗口出桶、净敞口阈值出桶、同合约不同方向净额相消、
+ * 完全相消（net=0）、batching 关闭时直通单笔对冲。
  */
 class HedgeBatcherTest {
 
@@ -101,8 +101,8 @@ class HedgeBatcherTest {
 
         assertEquals(1, batchItemMapper.items.size(), "应创建1条聚合子项");
         assertEquals(0, hedgeOrderMapper.orders.size(), "入桶时不应创建对冲订单");
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "BUY"),
-                "桶内应有1项（客户BUY→对冲BUY）");
+        assertEquals(1, hedgeBatcher.getBucketSize("AU2406"),
+                "桶内应有1项");
     }
 
     @Test
@@ -111,20 +111,20 @@ class HedgeBatcherTest {
         hedgeBatcher.enqueue(buildTradeEvent("T1", "AU2406", "BUY", new BigDecimal("5")));
         hedgeBatcher.enqueue(buildTradeEvent("T2", "AU2406", "BUY", new BigDecimal("3")));
 
-        assertEquals(2, hedgeBatcher.getBucketSize("AU2406", "BUY"),
+        assertEquals(2, hedgeBatcher.getBucketSize("AU2406"),
                 "同方向应合并到同一桶");
         assertEquals(2, batchItemMapper.items.size());
     }
 
     @Test
-    @DisplayName("同合约不同方向分到不同桶")
-    void enqueue_sameSymbolDifferentSide_differentBuckets() {
+    @DisplayName("同合约不同方向合并到同一桶（净额对冲）")
+    void enqueue_sameSymbolDifferentSide_sameBucket() {
         hedgeBatcher.enqueue(buildTradeEvent("T1", "AU2406", "BUY", new BigDecimal("5")));
         hedgeBatcher.enqueue(buildTradeEvent("T2", "AU2406", "SELL", new BigDecimal("3")));
 
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "BUY"), "BUY客户→BUY对冲桶");
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "SELL"), "SELL客户→SELL对冲桶");
-        assertEquals(2, hedgeBatcher.getActiveBucketCount(), "应有2个活跃桶");
+        assertEquals(2, hedgeBatcher.getBucketSize("AU2406"),
+                "BUY和SELL应合并到同一桶（净额对冲）");
+        assertEquals(1, hedgeBatcher.getActiveBucketCount(), "应只有1个活跃桶");
     }
 
     @Test
@@ -133,8 +133,8 @@ class HedgeBatcherTest {
         hedgeBatcher.enqueue(buildTradeEvent("T1", "AU2406", "BUY", new BigDecimal("5")));
         hedgeBatcher.enqueue(buildTradeEvent("T2", "AG2406", "BUY", new BigDecimal("3")));
 
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "BUY"));
-        assertEquals(1, hedgeBatcher.getBucketSize("AG2406", "BUY"));
+        assertEquals(1, hedgeBatcher.getBucketSize("AU2406"));
+        assertEquals(1, hedgeBatcher.getBucketSize("AG2406"));
         assertEquals(2, hedgeBatcher.getActiveBucketCount());
     }
 
@@ -151,29 +151,30 @@ class HedgeBatcherTest {
         assertTrue(first, "第一次应成功入桶");
         assertFalse(second, "第二次应因幂等跳过");
         assertEquals(1, batchItemMapper.items.size(), "只应创建1条子项");
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "BUY"), "桶内只有1项");
+        assertEquals(1, hedgeBatcher.getBucketSize("AU2406"), "桶内只有1项");
     }
 
-    // ==================== 数量阈值出桶测试 ====================
+    // ==================== 净敞口阈值出桶测试 ====================
 
     @Test
-    @DisplayName("数量达到阈值立即出桶")
-    void enqueue_sizeThresholdReached_flushesImmediately() {
+    @DisplayName("净敞口达到阈值立即出桶")
+    void enqueue_netExposureThresholdReached_flushesImmediately() {
         exchangeClient.responseOrderId = "EXCH-BATCH-001";
         hedgeBatcher.setSizeThreshold(new BigDecimal("20"));
 
-        // 第一笔 15 手，未达阈值
+        // 第一笔 BUY 15 手，净敞口=15，未达阈值
         hedgeBatcher.enqueue(buildTradeEvent("T1", "AU2406", "BUY", new BigDecimal("15")));
         assertEquals(0, hedgeOrderMapper.orders.size(), "未达阈值不应出桶");
 
-        // 第二笔 10 手，累计 25 手，达到 20 手阈值
+        // 第二笔 BUY 10 手，净敞口=25，达到 20 手阈值
         hedgeBatcher.enqueue(buildTradeEvent("T2", "AU2406", "BUY", new BigDecimal("10")));
 
         assertEquals(1, hedgeOrderMapper.orders.size(), "达到阈值应出桶创建1笔对冲订单");
         HedgeOrder order = hedgeOrderMapper.orders.get(0);
         assertEquals(1, order.getIsBatched(), "应为聚合订单");
         assertEquals(2, order.getBatchItemCount(), "应包含2个子项");
-        assertDecimalEquals(new BigDecimal("25.0000"), order.getQty(), "总量应为25手");
+        assertDecimalEquals(new BigDecimal("25.0000"), order.getQty(), "净量应为25手");
+        assertEquals("BUY", order.getSide(), "净多头→BUY对冲");
         assertEquals("EXCH-BATCH-001", order.getExchangeOrderId());
     }
 
@@ -190,33 +191,120 @@ class HedgeBatcherTest {
         assertDecimalEquals(new BigDecimal("100.0000"), order.getQty());
     }
 
+    // ==================== 净额对冲核心测试 ====================
+
+    @Test
+    @DisplayName("净额对冲：BUY 5 + SELL 3 → 净 BUY 2，仅提交1笔对冲单")
+    void flushBucket_netExposure_partialOffset() {
+        exchangeClient.responseOrderId = "EXCH-NET-001";
+        hedgeBatcher.enqueue(buildTradeEvent("T1", "AU2406", "BUY", new BigDecimal("5")));
+        hedgeBatcher.enqueue(buildTradeEvent("T2", "AU2406", "SELL", new BigDecimal("3")));
+
+        hedgeBatcher.flushBucket("AU2406");
+
+        assertEquals(1, hedgeOrderMapper.orders.size(), "应只创建1笔净额对冲订单");
+        HedgeOrder order = hedgeOrderMapper.orders.get(0);
+        assertEquals("BUY", order.getSide(), "净敞口=5-3=2>0→BUY");
+        assertDecimalEquals(new BigDecimal("2.0000"), order.getQty(), "净量应为2手");
+        assertEquals(2, order.getBatchItemCount(), "应包含2个子项");
+        assertEquals("EXCH-NET-001", order.getExchangeOrderId());
+
+        // 验证提交给交易所的订单数量
+        assertDecimalEquals(new BigDecimal("2"), exchangeClient.lastSubmittedRequest.getQty(),
+                "交易所收到的数量应为净量2手");
+        assertEquals("BUY", exchangeClient.lastSubmittedRequest.getSide());
+    }
+
+    @Test
+    @DisplayName("净额对冲：SELL 5 + BUY 3 → 净 SELL 2")
+    void flushBucket_netExposure_sellDominant() {
+        exchangeClient.responseOrderId = "EXCH-NET-002";
+        hedgeBatcher.enqueue(buildTradeEvent("T1", "AU2406", "SELL", new BigDecimal("5")));
+        hedgeBatcher.enqueue(buildTradeEvent("T2", "AU2406", "BUY", new BigDecimal("3")));
+
+        hedgeBatcher.flushBucket("AU2406");
+
+        assertEquals(1, hedgeOrderMapper.orders.size());
+        HedgeOrder order = hedgeOrderMapper.orders.get(0);
+        assertEquals("SELL", order.getSide(), "净敞口=3-5=-2<0→SELL");
+        assertDecimalEquals(new BigDecimal("2.0000"), order.getQty());
+        assertDecimalEquals(new BigDecimal("2"), exchangeClient.lastSubmittedRequest.getQty());
+        assertEquals("SELL", exchangeClient.lastSubmittedRequest.getSide());
+    }
+
+    @Test
+    @DisplayName("净额对冲：BUY 5 + SELL 5 → 完全相消，不提交交易所")
+    void flushBucket_netExposure_fullOffset() {
+        hedgeBatcher.enqueue(buildTradeEvent("T1", "AU2406", "BUY", new BigDecimal("5")));
+        hedgeBatcher.enqueue(buildTradeEvent("T2", "AU2406", "SELL", new BigDecimal("5")));
+
+        hedgeBatcher.flushBucket("AU2406");
+
+        assertEquals(1, hedgeOrderMapper.orders.size(), "应创建1条对冲订单记录（用于审计）");
+        HedgeOrder order = hedgeOrderMapper.orders.get(0);
+        assertEquals("INTERNALLY_NETTED", order.getStatus(), "状态应为内部相消");
+        assertNull(order.getExchangeOrderId(), "不应有交易所订单ID");
+        assertNull(exchangeClient.lastSubmittedRequest, "不应向交易所提交订单");
+
+        // 验证子项状态
+        for (HedgeBatchItem item : batchItemMapper.items) {
+            assertEquals("INTERNALLY_NETTED", item.getStatus(), "子项应标记为内部相消");
+            assertEquals(1, item.getNetted(), "netted标志应为1");
+        }
+    }
+
+    @Test
+    @DisplayName("净额对冲：同方向多笔 → 无相消，全额对冲")
+    void flushBucket_netExposure_sameDirection() {
+        exchangeClient.responseOrderId = "EXCH-NET-003";
+        hedgeBatcher.enqueue(buildTradeEvent("T1", "AU2406", "BUY", new BigDecimal("5")));
+        hedgeBatcher.enqueue(buildTradeEvent("T2", "AU2406", "BUY", new BigDecimal("3")));
+        hedgeBatcher.enqueue(buildTradeEvent("T3", "AU2406", "BUY", new BigDecimal("2")));
+
+        hedgeBatcher.flushBucket("AU2406");
+
+        assertEquals(1, hedgeOrderMapper.orders.size());
+        HedgeOrder order = hedgeOrderMapper.orders.get(0);
+        assertEquals("BUY", order.getSide());
+        assertDecimalEquals(new BigDecimal("10.0000"), order.getQty(), "5+3+2=10手");
+        assertEquals(3, order.getBatchItemCount());
+    }
+
+    @Test
+    @DisplayName("净额对冲：反向订单不达阈值时不出桶")
+    void enqueue_netExposureBelowThreshold_noFlush() {
+        hedgeBatcher.setSizeThreshold(new BigDecimal("50"));
+        hedgeBatcher.enqueue(buildTradeEvent("T1", "AU2406", "BUY", new BigDecimal("5")));
+        hedgeBatcher.enqueue(buildTradeEvent("T2", "AU2406", "SELL", new BigDecimal("3")));
+
+        assertEquals(0, hedgeOrderMapper.orders.size(), "净敞口=2<50，不应出桶");
+        assertEquals(2, hedgeBatcher.getBucketSize("AU2406"));
+    }
+
     // ==================== 手动出桶测试 ====================
 
     @Test
-    @DisplayName("手动 flushBucket 出桶提交聚合订单")
-    void flushBucket_createsBatchedOrder() {
+    @DisplayName("手动 flushBucket 出桶提交净额对冲订单")
+    void flushBucket_createsNettedOrder() {
         exchangeClient.responseOrderId = "EXCH-FLUSH-001";
         hedgeBatcher.enqueue(buildTradeEvent("T1", "AU2406", "BUY", new BigDecimal("5")));
         hedgeBatcher.enqueue(buildTradeEvent("T2", "AU2406", "BUY", new BigDecimal("3")));
         hedgeBatcher.enqueue(buildTradeEvent("T3", "AU2406", "SELL", new BigDecimal("4")));
 
-        hedgeBatcher.flushBucket("AU2406:BUY");
+        hedgeBatcher.flushBucket("AU2406");
 
-        assertEquals(1, hedgeOrderMapper.orders.size(), "出桶BUY方向应创建1笔订单");
+        assertEquals(1, hedgeOrderMapper.orders.size(), "出桶应创建1笔净额对冲订单");
         HedgeOrder order = hedgeOrderMapper.orders.get(0);
-        assertEquals("BUY", order.getSide());
-        assertEquals(2, order.getBatchItemCount());
-        assertDecimalEquals(new BigDecimal("8.0000"), order.getQty());
-        assertEquals(0, hedgeBatcher.getBucketSize("AU2406", "BUY"),
-                "出桶后桶应清空");
-        assertEquals(1, hedgeBatcher.getBucketSize("AU2406", "SELL"),
-                "另一方向桶不受影响");
+        assertEquals("BUY", order.getSide(), "净敞口=8-4=4>0→BUY");
+        assertDecimalEquals(new BigDecimal("4.0000"), order.getQty(), "净量=8-4=4手");
+        assertEquals(3, order.getBatchItemCount(), "应包含3个子项");
+        assertEquals(0, hedgeBatcher.getBucketSize("AU2406"), "出桶后桶应清空");
     }
 
     @Test
     @DisplayName("空桶 flush 不创建订单")
     void flushBucket_emptyBucket_noOrder() {
-        hedgeBatcher.flushBucket("NONEXISTENT:BUY");
+        hedgeBatcher.flushBucket("NONEXISTENT");
         assertEquals(0, hedgeOrderMapper.orders.size());
     }
 
@@ -230,7 +318,7 @@ class HedgeBatcherTest {
         assertEquals("PENDING", before.getStatus(), "入桶后状态应为PENDING");
         assertNull(before.getHedgeOrderId(), "PENDING时无hedgeOrderId");
 
-        hedgeBatcher.flushBucket("AG2406:SELL");
+        hedgeBatcher.flushBucket("AG2406");
 
         HedgeBatchItem after = batchItemMapper.items.get(0);
         assertEquals("SUBMITTED", after.getStatus(), "出桶后状态应为SUBMITTED");
@@ -318,6 +406,22 @@ class HedgeBatcherTest {
                     existing.setAvgPrice(order.getAvgPrice());
                     existing.setUpdatedAt(order.getUpdatedAt());
                     return 1;
+                }
+            }
+            // Also try by hedgeOrderId (for cases where exchangeOrderId is not yet set)
+            if (order.getHedgeOrderId() != null) {
+                for (int i = 0; i < orders.size(); i++) {
+                    if (order.getHedgeOrderId().equals(orders.get(i).getHedgeOrderId())) {
+                        HedgeOrder existing = orders.get(i);
+                        existing.setStatus(order.getStatus());
+                        existing.setFilledQty(order.getFilledQty());
+                        existing.setAvgPrice(order.getAvgPrice());
+                        existing.setUpdatedAt(order.getUpdatedAt());
+                        if (order.getExchangeOrderId() != null) {
+                            existing.setExchangeOrderId(order.getExchangeOrderId());
+                        }
+                        return 1;
+                    }
                 }
             }
             return 0;

@@ -12,10 +12,10 @@ import java.util.List;
 public interface HedgeBatchItemMapper {
 
     @Insert("INSERT INTO hedge_batch_items(id, hedge_order_id, original_trade_id, customer_id, " +
-            "symbol, side, qty, status, filled_qty, avg_price, created_at, updated_at) " +
+            "symbol, side, qty, status, filled_qty, avg_price, netted, created_at, updated_at) " +
             "VALUES(#{id}, #{hedgeOrderId}, #{originalTradeId}, #{customerId}, " +
             "#{symbol}, #{side}, #{qty}, #{status}, #{filledQty}, #{avgPrice}, " +
-            "#{createdAt}, #{updatedAt})")
+            "#{netted}, #{createdAt}, #{updatedAt})")
     int insert(HedgeBatchItem item);
 
     @Select("SELECT * FROM hedge_batch_items WHERE hedge_order_id = #{hedgeOrderId} ORDER BY id")
@@ -25,7 +25,7 @@ public interface HedgeBatchItemMapper {
     HedgeBatchItem findByOriginalTradeId(String originalTradeId);
 
     @Update("UPDATE hedge_batch_items SET status=#{status}, hedge_order_id=#{hedgeOrderId}, " +
-            "filled_qty=#{filledQty}, avg_price=#{avgPrice}, updated_at=#{updatedAt} " +
+            "filled_qty=#{filledQty}, avg_price=#{avgPrice}, netted=#{netted}, updated_at=#{updatedAt} " +
             "WHERE id = #{id}")
     int update(HedgeBatchItem item);
 
