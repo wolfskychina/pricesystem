@@ -173,7 +173,7 @@ item.setTraceId(TraceContext.getTraceId());
 
 ## 7. 已知限制与后续工作
 
-1. **阶段 9（日志格式配置）尚未落地**：各服务 `logback-spring.xml` 未创建，日志 pattern 中尚无 `[%X{traceId:-}]`。MDC 已写入 traceId，但日志未打印，需补齐 11 个服务的 logback 配置后才能在日志中看到 traceId。
+1. **~~阶段 9（日志格式配置）尚未落地~~ 已完成**：16 个服务的 `logback-spring.xml` 已创建，日志 pattern 含 `[%X{traceId:-}]`，从 MDC 读取 traceId 打印。测试验证日志中正确显示 `[trace-e2e-001]`（MDC 有值时）和 `[]`（MDC 清空时）。
 2. **`hedge_orders` 表 trace_id 列（可选增强）未做**：单笔对冲路径由 Webhook 回调触发，当前 `publishHedgeFillEvent` 取当前 MDC。若 sim-exchange 不回传 `X-Trace-Id`，单笔 hedge-fill-event 的 traceId 会丢失。如需续接原客户请求 traceId，需给 `hedge_orders` 加 trace_id 列，提交对冲单时写入，回调时反查恢复 MDC。
 3. **Webhook 回调 traceId 续接**：sim-exchange 推送回调时未透传入站请求的 `X-Trace-Id`，单笔对冲链路 traceId 在 execution→sim-exchange→execution 回调环节断裂（聚合链路因 `hedge_batch_items` 持久化 traceId 不受影响）。
 4. **Kafka 生产者拦截器需手动注册**：当前各服务 `application.yml` 未配置 `interceptor.classes`，直接走 `kafkaTemplate.send` 的路径（如 execution 发 hedge-fill-event）依赖 OutboxRelay 显式构造 header；非 Outbox 路径需补拦截器配置。
