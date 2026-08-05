@@ -3,6 +3,7 @@ package com.bank.trading.common.persistence.outbox;
 import com.alibaba.fastjson2.JSON;
 import com.bank.trading.common.core.event.BaseEvent;
 import com.bank.trading.common.core.idgen.IdGenerator;
+import com.bank.trading.common.core.trace.TraceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -41,6 +42,8 @@ public class OutboxServiceImpl implements OutboxService {
         message.setRetryCount(0);
         message.setCreatedAt(LocalDateTime.now());
         message.setShardId(shardId);
+        // 从 MDC 写入 traceId，供 OutboxRelay 投递时构造 Kafka RecordHeader
+        message.setTraceId(TraceContext.getTraceId());
         outboxMapper.insert(message);
     }
 

@@ -1,13 +1,16 @@
 package com.bank.trading.outbox.relay;
 
+import com.bank.trading.common.core.trace.TraceContext;
 import com.bank.trading.common.persistence.outbox.OutboxMessage;
 import com.bank.trading.common.persistence.outbox.OutboxMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
@@ -86,11 +89,19 @@ public class OutboxRelayRunner {
         }
 
         try {
+            // 显式构造 ProducerRecord，把 outbox 表中的 traceId 注入 Kafka header，
+            // 实现跨服务 traceId 透传（定时任务的 MDC traceId 是新建的，无法关联原始请求）
+            ProducerRecord<String, String> record = new ProducerRecord<>(
+                    msg.getTopic(), null, null, msg.getPartitionKey(), msg.getPayload());
+            if (msg.getTraceId() != null && !msg.getTraceId().isBlank()) {
+                record.headers().add(TraceContext.KAFKA_TRACE_HEADER,
+                        msg.getTraceId().getBytes(StandardCharsets.UTF_8));
+            }
             // 同步发送，等待 Kafka ack
-            kafkaTemplate.send(msg.getTopic(), msg.getPartitionKey(), msg.getPayload()).get();
+            kafkaTemplate.send(record).get();
             outboxMapper.markSent(msg.getId());
-            log.debug("Outbox message sent: id={}, eventId={}, topic={}",
-                    msg.getId(), msg.getEventId(), msg.getTopic());
+            log.debug("Outbox message sent: id={}, eventId={}, topic={}, traceId={}",
+                    msg.getId(), msg.getEventId(), msg.getTopic(), msg.getTraceId());
         } catch (Exception e) {
             outboxMapper.markFailed(msg.getId());
             log.warn("Outbox message send failed: id={}, eventId={}, topic={}, retryCount={}, error={}",

@@ -52,6 +52,13 @@ public class OutboxMessage {
     private LocalDateTime sentAt;
     /** 分片编号，消息持久化时写入，便于按分片查询待发送消息 */
     private Integer shardId;
+    /**
+     * 分布式链路追踪 ID，串联一次请求跨服务的所有事件。
+     * <p>
+     * 由 OutboxServiceImpl.saveEvent 从 MDC 写入，OutboxRelay 投递时取值构造 Kafka
+     * RecordHeader，实现跨服务 traceId 透传。
+     */
+    private String traceId;
 
     /** 状态常量：待发送 */
     public static final String STATUS_PENDING = "PENDING";
