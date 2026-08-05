@@ -7,10 +7,13 @@ import com.bank.trading.account.mapper.CustomerMapper;
 import com.bank.trading.account.service.AccountService;
 import com.bank.trading.common.core.dto.OrderCreateDTO;
 import com.bank.trading.common.core.dto.OrderDTO;
+import com.bank.trading.common.core.dto.QuoteDTO;
 import com.bank.trading.common.core.dto.RiskCheckRequest;
 import com.bank.trading.common.core.dto.RiskCheckResult;
 import com.bank.trading.common.core.event.HedgeFillEvent;
 import com.bank.trading.common.core.event.TradeEvent;
+import com.bank.trading.common.core.idgen.IdGenerator;
+import com.bank.trading.common.core.trace.TraceContext;
 import com.bank.trading.common.persistence.eventstore.EventStoreRecord;
 import com.bank.trading.common.persistence.eventstore.EventStoreService;
 import com.bank.trading.common.persistence.idempotent.IdempotentConsumer;
@@ -22,13 +25,16 @@ import com.bank.trading.execution.dto.ExchangeOrderRequest;
 import com.bank.trading.execution.dto.ExchangeOrderResponse;
 import com.bank.trading.execution.dto.ExchangeTradeNotification;
 import com.bank.trading.execution.entity.HedgeBatchItem;
+import com.bank.trading.execution.entity.HedgeFailureExposure;
 import com.bank.trading.execution.entity.HedgeOrder;
 import com.bank.trading.execution.entity.HedgeTrade;
 import com.bank.trading.execution.mapper.HedgeBatchItemMapper;
+import com.bank.trading.execution.mapper.HedgeFailureExposureMapper;
 import com.bank.trading.execution.mapper.HedgeOrderMapper;
 import com.bank.trading.execution.mapper.HedgeTradeMapper;
 import com.bank.trading.execution.service.ExecutionService;
 import com.bank.trading.execution.service.HedgeBatcher;
+import com.bank.trading.execution.util.RetryHelper;
 import com.bank.trading.oms.entity.Order;
 import com.bank.trading.oms.entity.Trade;
 import com.bank.trading.oms.mapper.OrderMapper;
@@ -105,6 +111,7 @@ class FullChainIntegrationTest {
     private OrderService orderService;
     private InMemoryOmsOrderMapper omsOrderMapper;
     private InMemoryOmsTradeMapper omsTradeMapper;
+    private MockOutboxService outboxService;
 
     // ==== Risk ====
     private RiskService riskService;
@@ -124,6 +131,8 @@ class FullChainIntegrationTest {
     private InMemoryHedgeOrderMapper hedgeOrderMapper;
     private InMemoryHedgeTradeMapper hedgeTradeMapper;
     private InMemoryBatchItemMapper batchItemMapper;
+    private InMemoryFailureExposureMapper failureExposureMapper;
+    private StubIdGenerator idGenerator;
 
     // ==== Sim Exchange ====
     private MarketDataEngine marketDataEngine;
@@ -132,8 +141,14 @@ class FullChainIntegrationTest {
     // ==== Kafka 捕获 ====
     private CapturingKafkaTemplate kafkaTemplate;
 
+    /** 全链路追踪测试用的固定 traceId */
+    private static final String TRACE_ID = "trace-e2e-001";
+
     @BeforeEach
     void setUp() {
+        // 0. 初始化共享 ID 生成器
+        idGenerator = new StubIdGenerator();
+
         // 1. 初始化行情引擎 & 撮合引擎
         marketDataEngine = new MarketDataEngine();
         SymbolConfig config = new SymbolConfig();
@@ -154,6 +169,7 @@ class FullChainIntegrationTest {
         hedgeOrderMapper = new InMemoryHedgeOrderMapper();
         hedgeTradeMapper = new InMemoryHedgeTradeMapper();
         batchItemMapper = new InMemoryBatchItemMapper();
+        failureExposureMapper = new InMemoryFailureExposureMapper();
 
         ExecutionServiceHolder execHolder = new ExecutionServiceHolder();
         BridgeCallbackRegistry callbackRegistry = new BridgeCallbackRegistry(execHolder, 30L);
@@ -163,14 +179,16 @@ class FullChainIntegrationTest {
         BridgeExchangeSessionClient exchangeClient = new BridgeExchangeSessionClient(matchingEngine);
 
         executionService = new ExecutionService(
-                hedgeOrderMapper, hedgeTradeMapper, batchItemMapper, exchangeClient, kafkaTemplate);
+                hedgeOrderMapper, hedgeTradeMapper, batchItemMapper, failureExposureMapper,
+                exchangeClient, kafkaTemplate, idGenerator,
+                new RetryHelper(6, 1000, 32000, 2.0, 0.3));
         setField(executionService, "tradeTopic", "trade-event");
         setField(executionService, "hedgeFillTopic", "hedge-fill-event");
         setField(executionService, "hedgeOrderType", "MARKET");
         setField(executionService, "hedgeRatio", new BigDecimal("1.0"));
         execHolder.service = executionService;
 
-        hedgeBatcher = new HedgeBatcher(batchItemMapper, executionService);
+        hedgeBatcher = new HedgeBatcher(batchItemMapper, executionService, idGenerator);
         hedgeBatcher.setBatchingEnabled(false);
         hedgeBatcher.setBatchingWindowMs(999_999);
         hedgeBatcher.setSizeThreshold(new BigDecimal("999"));
@@ -181,13 +199,13 @@ class FullChainIntegrationTest {
         hedgePositionMapper = new InMemoryHedgePositionMapper();
         InMemoryProcessedEventMapper positionProcessed = new InMemoryProcessedEventMapper();
         IdempotentConsumer positionIdempotent = new IdempotentConsumer(positionProcessed);
-        positionService = new PositionService(positionMapper, hedgePositionMapper, positionIdempotent);
+        positionService = new PositionService(positionMapper, hedgePositionMapper, positionIdempotent, idGenerator);
 
         // 5. 初始化 Account Service
         accountCustomerMapper = new InMemoryAccountCustomerMapper();
         InMemoryProcessedEventMapper accountProcessed = new InMemoryProcessedEventMapper();
         IdempotentConsumer accountIdempotent = new IdempotentConsumer(accountProcessed);
-        accountService = new AccountService(accountCustomerMapper, accountIdempotent);
+        accountService = new AccountService(accountCustomerMapper, accountIdempotent, idGenerator);
 
         // 创建测试客户
         Customer customer = new Customer();
@@ -211,14 +229,14 @@ class FullChainIntegrationTest {
         omsOrderMapper = new InMemoryOmsOrderMapper();
         omsTradeMapper = new InMemoryOmsTradeMapper();
         MockEventStoreService eventStoreService = new MockEventStoreService();
-        MockOutboxService outboxService = new MockOutboxService(kafkaTemplate);
+        outboxService = new MockOutboxService(kafkaTemplate);
 
         RiskChecker riskChecker = new DirectRiskChecker(riskService, accountService, positionService, marketDataEngine);
         PriceProvider priceProvider = new MarketDataPriceProvider(marketDataEngine);
 
         orderService = new OrderService(
                 omsOrderMapper, omsTradeMapper, eventStoreService, outboxService,
-                riskChecker, priceProvider);
+                riskChecker, priceProvider, idGenerator);
         setField(orderService, "tradeTopic", "trade-event");
     }
 
@@ -227,6 +245,9 @@ class FullChainIntegrationTest {
     @Test
     @DisplayName("FULL-1: 客户市价买入 10 手 → 风控通过 → 成交 → 持仓更新 → 额度扣减 → 对冲下单 → 对冲成交 → 净敞口为 0")
     void fullChain_marketBuy_10lots_fullHedge() throws Exception {
+        // ========== 设置 MDC traceId（模拟 TraceIdFilter 从 X-Trace-Id 头注入） ==========
+        TraceContext.setTraceId(TRACE_ID);
+
         // ========== 阶段 1：客户下单 ==========
         OrderCreateDTO createDTO = new OrderCreateDTO();
         createDTO.setClientOrderId("CLI-E2E-001");
@@ -243,6 +264,11 @@ class FullChainIntegrationTest {
         assertDecimalEquals(new BigDecimal("10"), order.getFilledQty());
         assertTrue(order.getAvgPrice().compareTo(BigDecimal.ZERO) > 0);
 
+        // traceId 断言 1：order.traceId 应等于 MDC 中的 traceId
+        Order persistedOrder = omsOrderMapper.findByOrderId(order.getOrderId());
+        assertEquals(TRACE_ID, persistedOrder.getTraceId(),
+                "order.traceId 应从 MDC 写入，与请求 traceId 一致");
+
         List<Trade> trades = omsTradeMapper.trades;
         assertEquals(1, trades.size());
         Trade trade = trades.get(0);
@@ -257,6 +283,15 @@ class FullChainIntegrationTest {
         List<CapturingKafkaTemplate.SentMessage> tradeEvents = kafkaTemplate.getByTopic("trade-event");
         assertEquals(1, tradeEvents.size());
         TradeEvent tradeEvent = JSON.parseObject(tradeEvents.get(0).value, TradeEvent.class);
+
+        // traceId 断言 2：trade-event.traceId 应等于 MDC 中的 traceId
+        assertEquals(TRACE_ID, tradeEvent.getTraceId(),
+                "trade-event.traceId 应从 MDC 赋值，与请求 traceId 一致");
+
+        // traceId 断言 3：outbox 消息的 traceId 应从 MDC 写入
+        assertEquals(1, outboxService.messages.size());
+        assertEquals(TRACE_ID, outboxService.messages.get(0).getTraceId(),
+                "outbox.traceId 应从 MDC 写入，与请求 traceId 一致");
 
         // 2a: position-service 消费
         positionService.onTradeEvent(tradeEvent);
@@ -284,7 +319,7 @@ class FullChainIntegrationTest {
         HedgeOrder hedgeOrder = hedgeOrderMapper.orders.get(0);
         assertEquals("BUY", hedgeOrder.getSide(), "客户 BUY → 对冲 BUY");
         assertDecimalEquals(new BigDecimal("10.0000"), hedgeOrder.getQty());
-        assertEquals("NEW", hedgeOrder.getStatus());
+        assertEquals("SUBMITTED", hedgeOrder.getStatus());
         assertNotNull(hedgeOrder.getExchangeOrderId());
 
         ExchangeOrder simOrder = matchingEngine.getAllOrders().stream()
@@ -307,6 +342,12 @@ class FullChainIntegrationTest {
                 hedgeFillEvents.get(hedgeFillEvents.size() - 1).value, HedgeFillEvent.class);
         assertEquals("BUY", hedgeFillEvent.getSide());
         assertEquals(SYMBOL, hedgeFillEvent.getSymbol());
+
+        // traceId 断言 4（单笔路径已知限制）：Webhook 回调在 MatchingEngine 异步线程执行，
+        // MDC 不会跨线程传播，故 publishHedgeFillEvent 从 MDC 取 traceId 为 null。
+        // 聚合路径的 traceId 透传验证见 FULL-5（从 hedge_batch_item.traceId 取值，不依赖 MDC）。
+        assertNull(hedgeFillEvent.getTraceId(),
+                "单笔对冲路径 Webhook 回调跨线程，MDC 无法传播，traceId 预期为 null（已知限制）");
 
         // ========== 阶段 5：hedge-fill-event 分发给 position-service ==========
         positionService.onHedgeFillEvent(hedgeFillEvent);
@@ -332,6 +373,9 @@ class FullChainIntegrationTest {
         System.out.println("可用额度: " + creditInfo.getAvailableCredit());
         System.out.println("对冲成交: " + filledHedge.getFilledQty() + " @ " + filledHedge.getAvgPrice());
         System.out.println("净敞口: " + netExp);
+
+        // 清理 MDC
+        TraceContext.clear();
     }
 
     @Test
@@ -504,6 +548,71 @@ class FullChainIntegrationTest {
                 "多客户聚合全额对冲后净敞口应接近 0，实际: " + exp.getNetExposure());
     }
 
+    @Test
+    @DisplayName("FULL-5: 聚合路径 traceId 透传 —— 入桶写入 item.traceId，出桶发 hedge-fill-event 从 item 取值（非 MDC）")
+    void fullChain_batching_traceIdPropagation() throws Exception {
+        // 开启聚合模式
+        hedgeBatcher.setBatchingEnabled(true);
+
+        // 设置 MDC traceId（模拟 TraceIdFilter 从 X-Trace-Id 头注入）
+        TraceContext.setTraceId(TRACE_ID);
+
+        // ========== 1. 客户下单 → trade-event ==========
+        OrderCreateDTO createDTO = new OrderCreateDTO();
+        createDTO.setClientOrderId("CLI-TRACE-001");
+        createDTO.setCustomerId(CUSTOMER_ID);
+        createDTO.setSymbol(SYMBOL);
+        createDTO.setSide("BUY");
+        createDTO.setType("MARKET");
+        createDTO.setQty(new BigDecimal("10"));
+        orderService.createOrder(createDTO);
+
+        TradeEvent tradeEvent = JSON.parseObject(
+                kafkaTemplate.getByTopic("trade-event").get(0).value, TradeEvent.class);
+        assertEquals(TRACE_ID, tradeEvent.getTraceId(),
+                "trade-event.traceId 应从 MDC 赋值，与请求 traceId 一致");
+
+        // ========== 2. trade-event 入桶 ==========
+        hedgeBatcher.enqueue(tradeEvent);
+
+        // traceId 断言：入桶时 item.traceId 应从 MDC 写入
+        HedgeBatchItem item = batchItemMapper.findByOriginalTradeId(tradeEvent.getTradeId());
+        assertNotNull(item, "trade-event 应已入桶");
+        assertEquals(TRACE_ID, item.getTraceId(),
+                "hedge_batch_item.traceId 入桶时应从 MDC 写入，与请求 traceId 一致");
+
+        // ========== 3. 清理 MDC ==========
+        // 模拟定时任务出桶时 MDC 是新建的，无法续接原客户请求的 traceId。
+        // 若 hedge-fill-event.traceId 仍等于 TRACE_ID，则证明是从 item 取值而非 MDC。
+        TraceContext.clear();
+        assertNull(TraceContext.getTraceId(), "MDC 已清空，确认 traceId 不在当前线程上下文");
+
+        // ========== 4. 手动触发出桶 → 提交聚合对冲单 ==========
+        hedgeBatcher.flushBucket(SYMBOL);
+
+        assertEquals(1, hedgeOrderMapper.orders.size());
+        HedgeOrder hedgeOrder = hedgeOrderMapper.orders.get(0);
+        assertEquals("BUY", hedgeOrder.getSide(), "客户 BUY → 对冲 BUY（同向）");
+
+        // ========== 5. 等待异步撮合 + Webhook 回调 ==========
+        awaitHedgeOrderFilled(hedgeOrder.getHedgeOrderId(), 2000);
+
+        // ========== 6. 验证 hedge-fill-event.traceId 从 item 取值 ==========
+        List<CapturingKafkaTemplate.SentMessage> hedgeFillEvents = kafkaTemplate.getByTopic("hedge-fill-event");
+        assertTrue(hedgeFillEvents.size() >= 1);
+        HedgeFillEvent hedgeFillEvent = JSON.parseObject(
+                hedgeFillEvents.get(hedgeFillEvents.size() - 1).value, HedgeFillEvent.class);
+
+        assertEquals(TRACE_ID, hedgeFillEvent.getTraceId(),
+                "聚合模式 hedge-fill-event.traceId 应从 hedge_batch_item.traceId 取值"
+                        + "（MDC 已清空，证明非 MDC 来源），与请求 traceId 一致");
+
+        System.out.println("=== 聚合路径 traceId 透传验证通过 ===");
+        System.out.println("入桶 item.traceId: " + item.getTraceId());
+        System.out.println("出桶 hedge-fill-event.traceId: " + hedgeFillEvent.getTraceId());
+        System.out.println("（MDC 已清空，traceId 从 hedge_batch_item 持久化取值）");
+    }
+
     // ==================== 辅助方法 ====================
 
     private RiskProperties buildRiskProperties() {
@@ -625,6 +734,23 @@ class FullChainIntegrationTest {
             } else {
                 return md.getBidPrice() != null ? md.getBidPrice() : md.getLastPrice();
             }
+        }
+
+        @Override
+        public QuoteDTO getQuote(String symbol) {
+            var md = marketDataEngine.getLatest(symbol);
+            if (md == null) return null;
+            QuoteDTO quote = new QuoteDTO();
+            quote.setSymbol(symbol);
+            quote.setMarketBidPrice(md.getBidPrice());
+            quote.setMarketAskPrice(md.getAskPrice());
+            quote.setCustomerBidPrice(md.getBidPrice());
+            quote.setCustomerAskPrice(md.getAskPrice());
+            quote.setSpread(md.getAskPrice() != null && md.getBidPrice() != null
+                    ? md.getAskPrice().subtract(md.getBidPrice()) : null);
+            quote.setTimestamp(System.currentTimeMillis());
+            quote.setValidUntil(System.currentTimeMillis() + 60_000);
+            return quote;
         }
     }
 
@@ -841,6 +967,38 @@ class FullChainIntegrationTest {
         @Override public int countByStatus(String status) {
             return (int) orders.stream().filter(o -> status.equals(o.getStatus())).count();
         }
+        @Override public List<HedgeOrder> findReadyForRetry(long currentTime) {
+            return orders.stream()
+                    .filter(o -> "RETRYING".equals(o.getStatus())
+                            && o.getNextRetryAt() != null && o.getNextRetryAt() <= currentTime)
+                    .toList();
+        }
+        @Override public List<HedgeOrder> findActiveOrders() {
+            return orders.stream()
+                    .filter(o -> List.of("PENDING", "RETRYING", "SUBMITTED").contains(o.getStatus()))
+                    .toList();
+        }
+        @Override public int updateForRetry(HedgeOrder o) {
+            for (int i = 0; i < orders.size(); i++) {
+                if (o.getHedgeOrderId() != null
+                        && o.getHedgeOrderId().equals(orders.get(i).getHedgeOrderId())) {
+                    HedgeOrder existing = orders.get(i);
+                    existing.setStatus(o.getStatus());
+                    existing.setRetryCount(o.getRetryCount());
+                    existing.setNextRetryAt(o.getNextRetryAt());
+                    existing.setFailureReason(o.getFailureReason());
+                    existing.setUpdatedAt(o.getUpdatedAt());
+                    return 1;
+                }
+            }
+            return 0;
+        }
+        @Override public List<HedgeOrder> findRetryingOrders(int limit) {
+            return orders.stream()
+                    .filter(o -> "RETRYING".equals(o.getStatus()))
+                    .limit(limit)
+                    .toList();
+        }
     }
 
     static class InMemoryHedgeTradeMapper implements HedgeTradeMapper {
@@ -922,6 +1080,8 @@ class FullChainIntegrationTest {
             msg.setPayload(JSON.toJSONString(event));
             msg.setStatus("PENDING");
             msg.setShardId(shardId);
+            // 与真实 OutboxServiceImpl 一致，从 MDC 写入 traceId（验证 outbox 透传）
+            msg.setTraceId(TraceContext.getTraceId());
             messages.add(msg);
 
             // 立即 relay 到 Kafka
@@ -1114,5 +1274,43 @@ class FullChainIntegrationTest {
             notification.setTradeTime(fill.getTradeTime());
             return notification;
         }
+    }
+
+    // ---- Stub IdGenerator（全链路测试用，返回自增 ID） ----
+
+    static class StubIdGenerator extends IdGenerator {
+        private long seq = 0;
+        StubIdGenerator() { super(0, 0); }
+        @Override public synchronized long nextLongId() { return ++seq; }
+    }
+
+    // ---- InMemory HedgeFailureExposureMapper（空实现，对冲正常流程不触发） ----
+
+    static class InMemoryFailureExposureMapper implements HedgeFailureExposureMapper {
+        final List<HedgeFailureExposure> exposures = new ArrayList<>();
+        @Override public void insert(HedgeFailureExposure exposure) { exposures.add(exposure); }
+        @Override public List<HedgeFailureExposure> findByStatus(String status) {
+            return exposures.stream().filter(e -> status.equals(e.getStatus())).toList();
+        }
+        @Override public List<HedgeFailureExposure> findBySymbolAndStatus(String symbol, String status) {
+            return exposures.stream()
+                    .filter(e -> symbol.equals(e.getSymbol()) && status.equals(e.getStatus())).toList();
+        }
+        @Override public HedgeFailureExposure findByOriginalTradeId(String originalTradeId) {
+            return exposures.stream()
+                    .filter(e -> originalTradeId.equals(e.getOriginalTradeId()))
+                    .findFirst().orElse(null);
+        }
+        @Override public void updateStatusByTradeId(String originalTradeId, String status, Long resolvedAt) {
+            exposures.stream()
+                    .filter(e -> originalTradeId.equals(e.getOriginalTradeId()))
+                    .forEach(e -> { e.setStatus(status); e.setResolvedAt(resolvedAt); });
+        }
+        @Override public void update(HedgeFailureExposure exposure) {
+            // no-op for test
+        }
+        @Override public BigDecimal sumPendingQty() { return BigDecimal.ZERO; }
+        @Override public BigDecimal sumExposureAmount() { return BigDecimal.ZERO; }
+        @Override public List<HedgeFailureExposureSummary> getSummaryBySymbol() { return List.of(); }
     }
 }
