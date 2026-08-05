@@ -2,6 +2,7 @@ package com.bank.trading.execution.service;
 
 import com.bank.trading.common.core.event.TradeEvent;
 import com.bank.trading.common.core.idgen.IdGenerator;
+import com.bank.trading.common.core.trace.TraceContext;
 import com.bank.trading.execution.entity.HedgeBatchItem;
 import com.bank.trading.execution.mapper.HedgeBatchItemMapper;
 import org.slf4j.Logger;
@@ -118,6 +119,10 @@ public class HedgeBatcher {
         item.setFilledQty(BigDecimal.ZERO);
         item.setAvgPrice(BigDecimal.ZERO);
         item.setNetted(0);
+        // 入桶时从 MDC 写入 traceId（关联原始客户请求）。
+        // 出桶发 hedge-fill-event 时取值赋给 event，保证聚合模式下每条事件仍能关联回
+        // 原始客户请求的 traceId（定时任务的 MDC 是新建的，无法续接）。
+        item.setTraceId(TraceContext.getTraceId());
         long now = System.currentTimeMillis();
         item.setCreatedAt(now);
         item.setUpdatedAt(now);

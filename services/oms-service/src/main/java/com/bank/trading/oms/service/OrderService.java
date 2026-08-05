@@ -6,6 +6,7 @@ import com.bank.trading.common.core.enums.OrderStatus;
 import com.bank.trading.common.core.enums.OrderType;
 import com.bank.trading.common.core.event.TradeEvent;
 import com.bank.trading.common.core.idgen.IdGenerator;
+import com.bank.trading.common.core.trace.TraceContext;
 import com.bank.trading.common.persistence.eventstore.EventStoreService;
 import com.bank.trading.common.persistence.outbox.OutboxService;
 import com.bank.trading.oms.entity.Order;
@@ -79,7 +80,9 @@ public class OrderService {
         order.setPrice(createDTO.getPrice());
         order.setAvgPrice(BigDecimal.ZERO);
         order.setStatus(OrderStatus.NEW.getCode());
-        order.setTraceId(createDTO.getTraceId());
+        // 优先从 MDC 获取 traceId（由 TraceIdFilter 从 X-Trace-Id 头注入），回退到 DTO
+        String traceId = TraceContext.getTraceId();
+        order.setTraceId(traceId != null ? traceId : createDTO.getTraceId());
         order.setCreatedAt(LocalDateTime.now());
         order.setUpdatedAt(LocalDateTime.now());
 
@@ -194,6 +197,8 @@ public class OrderService {
             event.setAmount(trade.getAmount());
             event.setTradeTime(trade.getTradeTime() != null
                     ? trade.getTradeTime().toEpochSecond(java.time.ZoneOffset.UTC) * 1000 : null);
+            // 从 MDC 获取 traceId，串联跨服务的对冲执行链路
+            event.setTraceId(TraceContext.getTraceId());
 
             int shardId = 0;
             eventStoreService.appendEvent(event, "TRADE", trade.getTradeId(), shardId);

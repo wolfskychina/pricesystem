@@ -4,6 +4,7 @@ import com.bank.trading.common.core.enums.OrderSide;
 import com.bank.trading.common.core.event.HedgeFillEvent;
 import com.bank.trading.common.core.event.TradeEvent;
 import com.bank.trading.common.core.idgen.IdGenerator;
+import com.bank.trading.common.core.trace.TraceContext;
 import com.bank.trading.execution.client.ExchangeSessionClient;
 import com.bank.trading.execution.dto.ExchangeOrderRequest;
 import com.bank.trading.execution.dto.ExchangeOrderResponse;
@@ -527,6 +528,9 @@ public class ExecutionService {
             event.setAmount(item.getFilledQty().multiply(item.getAvgPrice()));
             event.setTradeTime(hedgeTrade.getTradeTime());
             event.setOriginalTradeId(item.getOriginalTradeId());
+            // 聚合模式：定时任务出桶发事件，MDC 是新建的无法续接原客户请求的 traceId，
+            // 故从子项取值（入桶时已从 MDC 写入），保证每条 hedge-fill-event 可追溯。
+            event.setTraceId(item.getTraceId());
 
             String json = com.alibaba.fastjson2.JSON.toJSONString(event);
             kafkaTemplate.send(hedgeFillTopic, item.getSymbol(), json);
@@ -590,6 +594,10 @@ public class ExecutionService {
             event.setAmount(hedgeTrade.getAmount());
             event.setTradeTime(hedgeTrade.getTradeTime());
             event.setOriginalTradeId(hedgeOrder.getOriginalTradeId());
+            // 单笔对冲成交由 Webhook 回调触发，traceId 取当前 MDC（由 TraceIdFilter 从
+            // X-Trace-Id 头注入，未注入时为 null）。如需续接原客户请求 traceId，
+            // 需 hedge_orders 加 trace_id 列后从 hedgeOrder 取值（可选增强）。
+            event.setTraceId(TraceContext.getTraceId());
 
             String json = com.alibaba.fastjson2.JSON.toJSONString(event);
             kafkaTemplate.send(hedgeFillTopic, hedgeOrder.getSymbol(), json);

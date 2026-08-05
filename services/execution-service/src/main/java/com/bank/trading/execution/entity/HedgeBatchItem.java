@@ -41,6 +41,13 @@ public class HedgeBatchItem {
     private BigDecimal avgPrice;
     /** 是否内部相消（0=交易所对冲，1=内部相消，净敞口为0未提交交易所） */
     private Integer netted;
+    /**
+     * 分布式链路追踪 ID，入桶时从 MDC 写入（关联原始客户请求）。
+     * <p>
+     * 出桶发 hedge-fill-event 时取值赋给 event，保证聚合模式下每条事件
+     * 仍能关联回原始客户请求的 traceId（定时任务的 MDC 是新建的，无法续接）。
+     */
+    private String traceId;
     /** 重试次数 */
     private Integer retryCount;
     /** 失败原因 */
@@ -54,6 +61,8 @@ public class HedgeBatchItem {
     public void setRetryCount(Integer retryCount) { this.retryCount = retryCount; }
     public Integer getNetted() { return netted; }
     public void setNetted(Integer netted) { this.netted = netted; }
+    public String getTraceId() { return traceId; }
+    public void setTraceId(String traceId) { this.traceId = traceId; }
     public String getFailureReason() { return failureReason; }
     public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
 
