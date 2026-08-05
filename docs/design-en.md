@@ -190,7 +190,7 @@ Auxiliary services:
 ### 3.5 execution-service (Hedge Execution Service)
 
 - Consumes `trade-event` (Kafka topic: trade-event)
-- Computes hedge direction (opposite of client trade) and quantity (× hedge-ratio; default: full hedge)
+- Computes hedge direction (same as client trade: client BUY → market maker holds short exposure → hedge BUY to close short; client SELL → market maker holds long exposure → hedge SELL to close long) and quantity (× hedge-ratio; default: full hedge)
 - Submits orders to sim-exchange via ExchangeSessionClient (synchronous acceptance, returns NEW)
 - Receives sim-exchange webhook callbacks (order status reports + fill notifications), updates hedge order status to FILLED
 - Publishes `hedge-fill-event` (Kafka topic: hedge-fill-event)

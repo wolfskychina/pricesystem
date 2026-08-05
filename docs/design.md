@@ -184,7 +184,7 @@
 
 ### 3.5 execution-service（对冲执行服务）
 - 消费 `trade-event`（Kafka topic: trade-event）
-- 计算对冲方向（与客户成交相反）和数量（× hedge-ratio，默认全额对冲）
+- 计算对冲方向（与客户成交同向：客户 BUY → 做市商建立空头敞口 → 对冲 BUY 平掉空头；客户 SELL → 做市商建立多头敞口 → 对冲 SELL 平掉多头）和数量（× hedge-ratio，默认全额对冲）
 - 通过 ExchangeSessionClient 调用 sim-exchange 下单（同步受理，返回 NEW）
 - 接收 sim-exchange Webhook 回调（订单状态回报 + 成交通知），更新对冲订单状态为 FILLED
 - 发布 `hedge-fill-event`（Kafka topic: hedge-fill-event）到 Kafka
