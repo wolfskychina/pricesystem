@@ -50,6 +50,7 @@ public class HedgeBatcher {
     private final HedgeBatchItemMapper batchItemMapper;
     private final ExecutionService executionService;
     private final IdGenerator idGenerator;
+    private final HedgePositionProvider hedgePositionProvider;
 
     /** 聚合开关：true=开启聚合，false=每笔成交独立对冲（兼容旧行为） */
     @Value("${execution.batching-enabled:false}")
@@ -67,6 +68,10 @@ public class HedgeBatcher {
     @Value("${execution.hedge-ratio:1.0}")
     private BigDecimal hedgeRatio;
 
+    /** 对冲持仓库存上限（手），出桶时若新增对冲持仓会超过此上限则截断 */
+    @Value("${execution.hedge-inventory-cap:100}")
+    private BigDecimal hedgeInventoryCap;
+
     /**
      * 内存聚合桶。
      * key = symbol（合约代码，BUY 和 SELL 方向合并到同一桶）
@@ -75,10 +80,11 @@ public class HedgeBatcher {
     private final ConcurrentHashMap<String, List<HedgeBatchItem>> buckets = new ConcurrentHashMap<>();
 
     public HedgeBatcher(HedgeBatchItemMapper batchItemMapper, ExecutionService executionService,
-                        IdGenerator idGenerator) {
+                        IdGenerator idGenerator, HedgePositionProvider hedgePositionProvider) {
         this.batchItemMapper = batchItemMapper;
         this.executionService = executionService;
         this.idGenerator = idGenerator;
+        this.hedgePositionProvider = hedgePositionProvider;
     }
 
     /**
@@ -203,6 +209,16 @@ public class HedgeBatcher {
      * 出桶：将桶内所有子项（含 BUY 和 SELL）合并，计算净敞口后提交对冲单。
      * <p>
      * 调用 {@link ExecutionService#submitBatchedOrder} 处理净额计算和交易所提交。
+     * <p>
+     * <b>库存上限截断</b>：出桶前查询当前对冲持仓，若新增对冲持仓会超过库存上限
+     * （{@code hedge-inventory-cap}），则截断净敞口至上限范围内。截断部分保留在桶中
+     * 等待下次出桶（当对冲持仓因自然对冲减少时，剩余部分可继续对冲）。
+     * <p>
+     * 截断规则：
+     * <ul>
+     *   <li>netQty > 0（BUY）：effectiveQty = min(netQty, max(0, cap - currentPosition))</li>
+     *   <li>netQty < 0（SELL）：effectiveQty = max(netQty, min(0, -cap - currentPosition))</li>
+     * </ul>
      *
      * @param bucketKey 桶键（symbol）
      */
@@ -215,14 +231,139 @@ public class HedgeBatcher {
         List<HedgeBatchItem> items = new ArrayList<>(bucket);
         bucket.clear();
 
+        // 库存上限截断：查询当前对冲持仓，确保新增对冲不会超过库存上限
+        BigDecimal currentHedgePosition = hedgePositionProvider.getHedgePosition(bucketKey);
+        BigDecimal netQty = computeNetExposure(items);
+        BigDecimal cappedNetQty = applyInventoryCap(netQty, currentHedgePosition, bucketKey);
+
+        // 如果截断后净敞口为 0，整个批次被截断，放回桶等待下次出桶
+        if (cappedNetQty.compareTo(BigDecimal.ZERO) == 0 && netQty.compareTo(BigDecimal.ZERO) != 0) {
+            log.info("Bucket fully truncated by inventory cap: bucketKey={}, netQty={}, " +
+                            "currentHedgePosition={}, cap={}",
+                    bucketKey, netQty, currentHedgePosition, hedgeInventoryCap);
+            bucket.addAll(items);
+            return;
+        }
+
+        // 如果发生截断，选择部分子项提交（优先选与 netQty 同方向的子项）
+        List<HedgeBatchItem> submitItems;
+        if (cappedNetQty.compareTo(netQty) != 0) {
+            submitItems = selectItemsForCappedQty(items, cappedNetQty);
+            log.warn("Batch truncated by inventory cap: bucketKey={}, netQty={}, cappedNetQty={}, " +
+                            "currentHedgePosition={}, cap={}, submitCount={}, remainingCount={}",
+                    bucketKey, netQty, cappedNetQty, currentHedgePosition, hedgeInventoryCap,
+                    submitItems.size(), items.size() - submitItems.size());
+            // 剩余子项放回桶
+            items.removeAll(submitItems);
+            bucket.addAll(items);
+        } else {
+            submitItems = items;
+        }
+
         try {
-            executionService.submitBatchedOrder(items);
-            log.info("Bucket flushed: bucketKey={}, itemCount={}", bucketKey, items.size());
+            executionService.submitBatchedOrder(submitItems);
+            log.info("Bucket flushed: bucketKey={}, itemCount={}, netQty={}, cappedNetQty={}",
+                    bucketKey, submitItems.size(), netQty, cappedNetQty);
         } catch (Exception e) {
             log.error("Failed to flush bucket: bucketKey={}, error={}", bucketKey, e.getMessage());
-            // 出桶失败：将子项重新放回桶（下次重试），并更新状态为 PENDING
-            bucket.addAll(items);
+            // 出桶失败：将子项重新放回桶（下次重试）
+            bucket.addAll(submitItems);
         }
+    }
+
+    /**
+     * 应用库存上限截断，计算允许提交的有效净敞口。
+     * <p>
+     * 截断规则：
+     * <ul>
+     *   <li>netQty > 0（BUY）：effectiveQty = min(netQty, max(0, cap - currentPosition))</li>
+     *   <li>netQty < 0（SELL）：effectiveQty = max(netQty, min(0, -cap - currentPosition))</li>
+     *   <li>netQty = 0：不截断（完全相消，不增加库存）</li>
+     * </ul>
+     *
+     * @param netQty              净敞口
+     * @param currentHedgePosition 当前对冲持仓
+     * @param symbol              合约代码
+     * @return 截断后的有效净敞口
+     */
+    private BigDecimal applyInventoryCap(BigDecimal netQty, BigDecimal currentHedgePosition,
+                                         String symbol) {
+        if (netQty.compareTo(BigDecimal.ZERO) == 0) {
+            return BigDecimal.ZERO;
+        }
+
+        BigDecimal cappedNetQty;
+        if (netQty.compareTo(BigDecimal.ZERO) > 0) {
+            // BUY 方向：新增对冲持仓 = currentPosition + netQty，不能超过 cap
+            BigDecimal maxAllowed = hedgeInventoryCap.subtract(currentHedgePosition).max(BigDecimal.ZERO);
+            cappedNetQty = netQty.min(maxAllowed);
+        } else {
+            // SELL 方向：新增对冲持仓 = currentPosition + netQty（netQty 为负），不能低于 -cap
+            BigDecimal minAllowed = hedgeInventoryCap.negate().subtract(currentHedgePosition).min(BigDecimal.ZERO);
+            cappedNetQty = netQty.max(minAllowed);
+        }
+
+        if (cappedNetQty.compareTo(netQty) != 0) {
+            log.info("Inventory cap applied: symbol={}, netQty={}, cappedNetQty={}, " +
+                            "currentHedgePosition={}, cap={}",
+                    symbol, netQty, cappedNetQty, currentHedgePosition, hedgeInventoryCap);
+        }
+
+        return cappedNetQty;
+    }
+
+    /**
+     * 从子项列表中选择与截断后净敞口方向一致的子项，按比例削减数量。
+     * <p>
+     * 策略：选择与 netQty 同方向的子项，按比例削减 qty 使 netQty = cappedNetQty。
+     * 同方向子项按原始 qty 比例分摊削减量。
+     *
+     * @param items       原始子项列表
+     * @param cappedNetQty 截断后的净敞口
+     * @return 调整后的子项列表（含削减后的 qty）
+     */
+    private List<HedgeBatchItem> selectItemsForCappedQty(List<HedgeBatchItem> items,
+                                                         BigDecimal cappedNetQty) {
+        BigDecimal netQty = computeNetExposure(items);
+        boolean isBuy = cappedNetQty.compareTo(BigDecimal.ZERO) > 0;
+        String targetSide = isBuy ? "BUY" : "SELL";
+
+        // 计算同方向子项的总数量
+        BigDecimal sameSideTotal = BigDecimal.ZERO;
+        for (HedgeBatchItem item : items) {
+            if (targetSide.equals(item.getSide())) {
+                sameSideTotal = sameSideTotal.add(item.getQty());
+            }
+        }
+
+        // 削减比例 = cappedNetQty / sameSideTotal（同方向子项总数量）
+        BigDecimal scaleRatio = sameSideTotal.compareTo(BigDecimal.ZERO) > 0
+                ? cappedNetQty.abs().divide(sameSideTotal, 8, java.math.RoundingMode.HALF_UP)
+                : BigDecimal.ZERO;
+
+        List<HedgeBatchItem> result = new ArrayList<>();
+        BigDecimal allocated = BigDecimal.ZERO;
+        for (int i = items.size() - 1; i >= 0; i--) {
+            HedgeBatchItem item = items.get(i);
+            if (targetSide.equals(item.getSide())) {
+                BigDecimal scaledQty;
+                if (result.isEmpty()) {
+                    // 最后一项吸收尾差
+                    scaledQty = cappedNetQty.abs().subtract(allocated).max(BigDecimal.ZERO);
+                } else {
+                    scaledQty = item.getQty().multiply(scaleRatio)
+                            .setScale(4, java.math.RoundingMode.HALF_UP);
+                    allocated = allocated.add(scaledQty);
+                }
+                item.setQty(scaledQty);
+                result.add(item);
+            } else {
+                // 反向子项：保留原始数量（用于净额计算）
+                result.add(item);
+            }
+        }
+
+        return result;
     }
 
     /**
@@ -276,5 +417,9 @@ public class HedgeBatcher {
 
     public void setHedgeRatio(BigDecimal hedgeRatio) {
         this.hedgeRatio = hedgeRatio;
+    }
+
+    public void setHedgeInventoryCap(BigDecimal hedgeInventoryCap) {
+        this.hedgeInventoryCap = hedgeInventoryCap;
     }
 }

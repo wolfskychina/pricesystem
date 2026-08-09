@@ -1,6 +1,7 @@
 package com.bank.trading.account.service;
 
 import com.bank.trading.common.core.event.TradeEvent;
+import com.bank.trading.common.core.idgen.IdGenerator;
 import com.bank.trading.common.persistence.idempotent.IdempotentConsumer;
 import com.bank.trading.common.persistence.idempotent.ProcessedEventMapper;
 import com.bank.trading.account.dto.CreditInfo;
@@ -37,7 +38,7 @@ class AccountServiceTest {
         customerMapper = new InMemoryCustomerMapper();
         processedEventMapper = new InMemoryProcessedEventMapper();
         IdempotentConsumer idempotentConsumer = new IdempotentConsumer(processedEventMapper);
-        accountService = new AccountService(customerMapper, idempotentConsumer);
+        accountService = new AccountService(customerMapper, idempotentConsumer, new StubIdGenerator());
     }
 
     // ==================== 客户 CRUD 测试 ====================
@@ -609,5 +610,11 @@ class AccountServiceTest {
         public int exists(String eventId) {
             return processed.contains(eventId) ? 1 : 0;
         }
+    }
+
+    static class StubIdGenerator extends IdGenerator {
+        private long seq = 0;
+        StubIdGenerator() { super(0, 0); }
+        @Override public synchronized long nextLongId() { return ++seq; }
     }
 }

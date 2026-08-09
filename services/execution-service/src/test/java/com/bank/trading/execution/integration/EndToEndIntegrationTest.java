@@ -16,6 +16,7 @@ import com.bank.trading.execution.mapper.HedgeOrderMapper;
 import com.bank.trading.execution.mapper.HedgeTradeMapper;
 import com.bank.trading.execution.service.ExecutionService;
 import com.bank.trading.execution.service.HedgeBatcher;
+import com.bank.trading.execution.service.HedgePositionProvider;
 import com.bank.trading.execution.util.RetryHelper;
 import com.bank.trading.simexchange.callback.CallbackRegistry;
 import com.bank.trading.simexchange.engine.MarketDataEngine;
@@ -73,6 +74,7 @@ class EndToEndIntegrationTest {
     private ExecutionService executionService;
     private HedgeBatcher hedgeBatcher;
     private StubIdGenerator idGenerator;
+    private MockHedgePositionProvider hedgePositionProvider;
 
     @BeforeEach
     void setUp() {
@@ -96,6 +98,7 @@ class EndToEndIntegrationTest {
         failureExposureMapper = new InMemoryFailureExposureMapper();
         kafkaTemplate = new CapturingKafkaTemplate();
         idGenerator = new StubIdGenerator();
+        hedgePositionProvider = new MockHedgePositionProvider();
 
         // 3. 打破循环依赖（ExecutionService → ExchangeSessionClient → MatchingEngine
         //    → CallbackRegistry → ExecutionService）：
@@ -125,11 +128,12 @@ class EndToEndIntegrationTest {
         holder.service = executionService;
 
         // 9. 创建 HedgeBatcher（依赖 executionService）
-        hedgeBatcher = new HedgeBatcher(batchItemMapper, executionService, idGenerator);
+        hedgeBatcher = new HedgeBatcher(batchItemMapper, executionService, idGenerator, hedgePositionProvider);
         hedgeBatcher.setBatchingEnabled(true);
         hedgeBatcher.setBatchingWindowMs(999_999);    // 大窗口，避免定时触发
         hedgeBatcher.setSizeThreshold(new BigDecimal("999"));  // 大阈值，避免数量触发
         hedgeBatcher.setHedgeRatio(new BigDecimal("1.0"));
+        hedgeBatcher.setHedgeInventoryCap(new BigDecimal("999"));
     }
 
     // ==================== 端到端测试场景 ====================
@@ -726,6 +730,15 @@ class EndToEndIntegrationTest {
             SentMessage(String topic, String key, String value) {
                 this.topic = topic; this.key = key; this.value = value;
             }
+        }
+    }
+
+    static class MockHedgePositionProvider implements HedgePositionProvider {
+        private final java.util.Map<String, BigDecimal> positions = new java.util.HashMap<>();
+
+        @Override
+        public BigDecimal getHedgePosition(String symbol) {
+            return positions.getOrDefault(symbol, BigDecimal.ZERO);
         }
     }
 }

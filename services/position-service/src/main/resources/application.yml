@@ -34,6 +34,9 @@ position:
   trade-topic: trade-event
   # 消费的对冲成交事件 topic
   hedge-fill-topic: hedge-fill-event
+  # 库存监控配置
+  inventory-check-interval-ms: 60000   # 库存检查间隔（毫秒），默认 60s
+  hedge-inventory-cap: 100             # 对冲持仓库存上限（手），超过时告警
 
 eureka:
   client:

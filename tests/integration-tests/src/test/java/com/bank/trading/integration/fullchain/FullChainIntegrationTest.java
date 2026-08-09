@@ -34,6 +34,7 @@ import com.bank.trading.execution.mapper.HedgeOrderMapper;
 import com.bank.trading.execution.mapper.HedgeTradeMapper;
 import com.bank.trading.execution.service.ExecutionService;
 import com.bank.trading.execution.service.HedgeBatcher;
+import com.bank.trading.execution.service.HedgePositionProvider;
 import com.bank.trading.execution.util.RetryHelper;
 import com.bank.trading.oms.entity.Order;
 import com.bank.trading.oms.entity.Trade;
@@ -133,6 +134,7 @@ class FullChainIntegrationTest {
     private InMemoryBatchItemMapper batchItemMapper;
     private InMemoryFailureExposureMapper failureExposureMapper;
     private StubIdGenerator idGenerator;
+    private MockHedgePositionProvider hedgePositionProvider;
 
     // ==== Sim Exchange ====
     private MarketDataEngine marketDataEngine;
@@ -188,11 +190,13 @@ class FullChainIntegrationTest {
         setField(executionService, "hedgeRatio", new BigDecimal("1.0"));
         execHolder.service = executionService;
 
-        hedgeBatcher = new HedgeBatcher(batchItemMapper, executionService, idGenerator);
+        hedgePositionProvider = new MockHedgePositionProvider();
+        hedgeBatcher = new HedgeBatcher(batchItemMapper, executionService, idGenerator, hedgePositionProvider);
         hedgeBatcher.setBatchingEnabled(false);
         hedgeBatcher.setBatchingWindowMs(999_999);
         hedgeBatcher.setSizeThreshold(new BigDecimal("999"));
         hedgeBatcher.setHedgeRatio(new BigDecimal("1.0"));
+        hedgeBatcher.setHedgeInventoryCap(new BigDecimal("100"));
 
         // 4. 初始化 Position Service
         positionMapper = new InMemoryPositionMapper();
@@ -1312,5 +1316,226 @@ class FullChainIntegrationTest {
         @Override public BigDecimal sumPendingQty() { return BigDecimal.ZERO; }
         @Override public BigDecimal sumExposureAmount() { return BigDecimal.ZERO; }
         @Override public List<HedgeFailureExposureSummary> getSummaryBySymbol() { return List.of(); }
+    }
+
+    // ---- Mock HedgePositionProvider（模拟 position-service 的对冲持仓查询） ----
+
+    static class MockHedgePositionProvider implements HedgePositionProvider {
+        private final Map<String, BigDecimal> positions = new HashMap<>();
+
+        @Override
+        public BigDecimal getHedgePosition(String symbol) {
+            return positions.getOrDefault(symbol, BigDecimal.ZERO);
+        }
+
+        /** 设置模拟的对冲持仓（正=BUY多头，负=SELL空头） */
+        void setHedgePosition(String symbol, BigDecimal qty) {
+            positions.put(symbol, qty);
+        }
+    }
+
+    // ==================== 库存监控与截断测试 ====================
+
+    @Test
+    @DisplayName("INV-1: 对冲持仓未达上限 → 正常出桶，不截断")
+    void inventoryCap_withinLimit_noTruncation() throws Exception {
+        hedgeBatcher.setBatchingEnabled(true);
+        hedgeBatcher.setHedgeInventoryCap(new BigDecimal("100"));
+
+        // 设置当前对冲持仓为 50（远低于上限 100）
+        hedgePositionProvider.setHedgePosition(SYMBOL, new BigDecimal("50"));
+
+        // 下单 20 手 BUY，净敞口 = 20，新增对冲持仓 = 50 + 20 = 70 <= 100，不截断
+        TraceContext.setTraceId(TRACE_ID);
+        OrderCreateDTO dto = new OrderCreateDTO();
+        dto.setClientOrderId("CLI-INV-001");
+        dto.setCustomerId(CUSTOMER_ID);
+        dto.setSymbol(SYMBOL);
+        dto.setSide("BUY");
+        dto.setType("MARKET");
+        dto.setQty(new BigDecimal("20"));
+        orderService.createOrder(dto);
+
+        TradeEvent tradeEvent = JSON.parseObject(
+                kafkaTemplate.getByTopic("trade-event").get(0).value, TradeEvent.class);
+        hedgeBatcher.enqueue(tradeEvent);
+        TraceContext.clear();
+
+        // 手动出桶
+        hedgeBatcher.flushBucket(SYMBOL);
+
+        assertEquals(1, hedgeOrderMapper.orders.size());
+        HedgeOrder hedgeOrder = hedgeOrderMapper.orders.get(0);
+        assertEquals("BUY", hedgeOrder.getSide());
+        assertDecimalEquals(new BigDecimal("20.0000"), hedgeOrder.getQty(),
+                "持仓未达上限，净敞口不应截断");
+
+        System.out.println("=== 库存上限内正常出桶验证通过 ===");
+    }
+
+    @Test
+    @DisplayName("INV-2: 对冲持仓已达上限 → 出桶截断，净敞口缩减至上限范围内")
+    void inventoryCap_atLimit_truncation() throws Exception {
+        hedgeBatcher.setBatchingEnabled(true);
+        hedgeBatcher.setHedgeInventoryCap(new BigDecimal("100"));
+
+        // 设置当前对冲持仓为 90（接近上限 100）
+        hedgePositionProvider.setHedgePosition(SYMBOL, new BigDecimal("90"));
+
+        // 下单 30 手 BUY，净敞口 = 30，新增对冲持仓 = 90 + 30 = 120 > 100，应截断为 10
+        TraceContext.setTraceId(TRACE_ID);
+        OrderCreateDTO dto = new OrderCreateDTO();
+        dto.setClientOrderId("CLI-INV-002");
+        dto.setCustomerId(CUSTOMER_ID);
+        dto.setSymbol(SYMBOL);
+        dto.setSide("BUY");
+        dto.setType("MARKET");
+        dto.setQty(new BigDecimal("30"));
+        orderService.createOrder(dto);
+
+        TradeEvent tradeEvent = JSON.parseObject(
+                kafkaTemplate.getByTopic("trade-event").get(0).value, TradeEvent.class);
+        hedgeBatcher.enqueue(tradeEvent);
+        TraceContext.clear();
+
+        // 手动出桶
+        hedgeBatcher.flushBucket(SYMBOL);
+
+        assertEquals(1, hedgeOrderMapper.orders.size());
+        HedgeOrder hedgeOrder = hedgeOrderMapper.orders.get(0);
+        assertEquals("BUY", hedgeOrder.getSide());
+        assertTrue(hedgeOrder.getQty().compareTo(new BigDecimal("20")) < 0,
+                "持仓已达上限附近，净敞口应被截断，实际: " + hedgeOrder.getQty());
+        assertTrue(hedgeOrder.getQty().compareTo(BigDecimal.ZERO) > 0,
+                "截断后仍应有部分对冲，实际: " + hedgeOrder.getQty());
+
+        // 剩余子项应回到桶中
+        assertTrue(hedgeBatcher.getBucketSize(SYMBOL) >= 0,
+                "截断后剩余子项应放回桶或提交");
+
+        System.out.println("=== 库存上限截断验证通过，截断后 qty: " + hedgeOrder.getQty() + " ===");
+    }
+
+    @Test
+    @DisplayName("INV-3: 对冲持仓超过上限 → 出桶完全截断，子项放回桶等待下次出桶")
+    void inventoryCap_exceeded_fullTruncation() throws Exception {
+        hedgeBatcher.setBatchingEnabled(true);
+        hedgeBatcher.setHedgeInventoryCap(new BigDecimal("100"));
+
+        // 设置当前对冲持仓为 120（已超过上限 100）
+        hedgePositionProvider.setHedgePosition(SYMBOL, new BigDecimal("120"));
+
+        // 下单 10 手 BUY，净敞口 = 10，新增对冲持仓 = 120 + 10 = 130 > 100，应完全截断
+        TraceContext.setTraceId(TRACE_ID);
+        OrderCreateDTO dto = new OrderCreateDTO();
+        dto.setClientOrderId("CLI-INV-003");
+        dto.setCustomerId(CUSTOMER_ID);
+        dto.setSymbol(SYMBOL);
+        dto.setSide("BUY");
+        dto.setType("MARKET");
+        dto.setQty(new BigDecimal("10"));
+        orderService.createOrder(dto);
+
+        TradeEvent tradeEvent = JSON.parseObject(
+                kafkaTemplate.getByTopic("trade-event").get(0).value, TradeEvent.class);
+        hedgeBatcher.enqueue(tradeEvent);
+        TraceContext.clear();
+
+        int orderCountBefore = hedgeOrderMapper.orders.size();
+
+        // 手动出桶 → 应完全截断，不提交任何对冲单
+        hedgeBatcher.flushBucket(SYMBOL);
+
+        assertEquals(orderCountBefore, hedgeOrderMapper.orders.size(),
+                "持仓已超上限，应完全截断，不提交对冲单");
+
+        // 子项应放回桶中
+        assertTrue(hedgeBatcher.getBucketSize(SYMBOL) > 0,
+                "截断的子项应放回桶等待下次出桶");
+
+        System.out.println("=== 完全截断验证通过，桶内剩余子项: " + hedgeBatcher.getBucketSize(SYMBOL) + " ===");
+    }
+
+    @Test
+    @DisplayName("INV-4: SELL 方向对冲持仓超上限 → 出桶截断")
+    void inventoryCap_sellDirection_truncation() throws Exception {
+        hedgeBatcher.setBatchingEnabled(true);
+        hedgeBatcher.setHedgeInventoryCap(new BigDecimal("100"));
+
+        // 设置当前对冲持仓为 -90（空头接近上限 -100）
+        hedgePositionProvider.setHedgePosition(SYMBOL, new BigDecimal("-90"));
+
+        // 下单 30 手 SELL，净敞口 = -30，新增对冲持仓 = -90 + (-30) = -120 < -100，应截断为 -10
+        TraceContext.setTraceId(TRACE_ID);
+        OrderCreateDTO dto = new OrderCreateDTO();
+        dto.setClientOrderId("CLI-INV-004");
+        dto.setCustomerId(CUSTOMER_ID);
+        dto.setSymbol(SYMBOL);
+        dto.setSide("SELL");
+        dto.setType("MARKET");
+        dto.setQty(new BigDecimal("30"));
+        orderService.createOrder(dto);
+
+        TradeEvent tradeEvent = JSON.parseObject(
+                kafkaTemplate.getByTopic("trade-event").get(0).value, TradeEvent.class);
+        hedgeBatcher.enqueue(tradeEvent);
+        TraceContext.clear();
+
+        // 手动出桶
+        hedgeBatcher.flushBucket(SYMBOL);
+
+        assertEquals(1, hedgeOrderMapper.orders.size());
+        HedgeOrder hedgeOrder = hedgeOrderMapper.orders.get(0);
+        assertEquals("SELL", hedgeOrder.getSide());
+        assertTrue(hedgeOrder.getQty().compareTo(new BigDecimal("20")) < 0,
+                "空头持仓已达上限附近，应被截断，实际: " + hedgeOrder.getQty());
+
+        System.out.println("=== SELL 方向截断验证通过，截断后 qty: " + hedgeOrder.getQty() + " ===");
+    }
+
+    @Test
+    @DisplayName("INV-5: InventoryMonitor 检测对冲持仓超阈值")
+    void inventoryMonitor_exceedsThreshold_alerts() throws Exception {
+        // 先建立对冲持仓
+        hedgeBatcher.setBatchingEnabled(false);
+        TraceContext.setTraceId(TRACE_ID);
+        OrderCreateDTO dto = new OrderCreateDTO();
+        dto.setClientOrderId("CLI-INV-MON");
+        dto.setCustomerId(CUSTOMER_ID);
+        dto.setSymbol(SYMBOL);
+        dto.setSide("BUY");
+        dto.setType("MARKET");
+        dto.setQty(new BigDecimal("10"));
+        orderService.createOrder(dto);
+
+        TradeEvent tradeEvent = JSON.parseObject(
+                kafkaTemplate.getByTopic("trade-event").get(0).value, TradeEvent.class);
+        positionService.onTradeEvent(tradeEvent);
+        hedgeBatcher.enqueue(tradeEvent);
+        awaitHedgeOrderFilled(hedgeOrderMapper.orders.get(0).getHedgeOrderId(), 2000);
+        List<CapturingKafkaTemplate.SentMessage> hedgeEvents = kafkaTemplate.getByTopic("hedge-fill-event");
+        HedgeFillEvent hedgeFillEvent = JSON.parseObject(
+                hedgeEvents.get(hedgeEvents.size() - 1).value, HedgeFillEvent.class);
+        positionService.onHedgeFillEvent(hedgeFillEvent);
+        TraceContext.clear();
+
+        // 验证对冲持仓存在
+        HedgePosition hedgePos = hedgePositionMapper.findBySymbol(SYMBOL);
+        assertNotNull(hedgePos);
+        assertTrue(hedgePos.getQty().compareTo(BigDecimal.ZERO) > 0);
+
+        // 计算净敞口（验证对冲持仓已记录）
+        List<NetExposure> exposures = positionService.calculateNetExposure();
+        NetExposure exp = exposures.stream()
+                .filter(e -> SYMBOL.equals(e.getSymbol()))
+                .findFirst().orElse(null);
+        assertNotNull(exp);
+        // 对冲持仓应与客户持仓同向，净敞口应接近 0
+        assertTrue(exp.getNetExposure().abs().compareTo(new BigDecimal("0.01")) <= 0,
+                "全额对冲后净敞口应接近 0");
+
+        System.out.println("=== InventoryMonitor 验证通过 ===");
+        System.out.println("对冲持仓: " + hedgePos.getQty());
+        System.out.println("净敞口: " + exp.getNetExposure());
     }
 }

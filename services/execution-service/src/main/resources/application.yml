@@ -39,6 +39,8 @@ execution:
   # 本服务对外暴露的回调接收基础地址（sim-exchange 推送 webhook 到此地址）
   # 部署时需改为可被 sim-exchange 访问的实际地址
   callback-base-url: http://localhost:8086/execution/callback
+  # position-service REST 基础地址（用于查询对冲持仓进行库存上限截断）
+  position-service-url: http://localhost:8087
   # 对冲下单类型：MARKET（市价对冲，立即成交）/ LIMIT（限价对冲）
   hedge-order-type: MARKET
   # 对冲比例：1.0 = 全额对冲（100%），0.5 = 半额对冲
@@ -47,6 +49,8 @@ execution:
   batching-enabled: true       # 是否开启对冲聚合（开发环境开启以便验证）
   batching-window-ms: 1000     # 聚合时间窗口（毫秒），开发环境 1s，生产环境建议 200ms
   batching-size-threshold: 50  # 数量阈值（手），单桶累计超此值立即出桶
+  # 对冲持仓库存上限（手），出桶时若新增对冲持仓超过此上限则截断
+  hedge-inventory-cap: 100
   # 对冲失败应对方案配置
   hedge:
     capacity-check:

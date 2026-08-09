@@ -37,6 +37,7 @@ class HedgeBatcherTest {
     private StubExchangeSessionClient exchangeClient;
     private CapturingKafkaTemplate kafkaTemplate;
     private StubIdGenerator idGenerator;
+    private MockHedgePositionProvider hedgePositionProvider;
 
     @BeforeEach
     void setUp() {
@@ -47,6 +48,7 @@ class HedgeBatcherTest {
         exchangeClient = new StubExchangeSessionClient();
         kafkaTemplate = new CapturingKafkaTemplate();
         idGenerator = new StubIdGenerator();
+        hedgePositionProvider = new MockHedgePositionProvider();
 
         executionService = new ExecutionService(
                 hedgeOrderMapper, hedgeTradeMapper, batchItemMapper, failureExposureMapper,
@@ -57,11 +59,12 @@ class HedgeBatcherTest {
         setField(executionService, "hedgeOrderType", "MARKET");
         setField(executionService, "hedgeRatio", new BigDecimal("1.0"));
 
-        hedgeBatcher = new HedgeBatcher(batchItemMapper, executionService, idGenerator);
+        hedgeBatcher = new HedgeBatcher(batchItemMapper, executionService, idGenerator, hedgePositionProvider);
         hedgeBatcher.setBatchingEnabled(true);
         hedgeBatcher.setBatchingWindowMs(1000);
         hedgeBatcher.setSizeThreshold(new BigDecimal("50"));
         hedgeBatcher.setHedgeRatio(new BigDecimal("1.0"));
+        hedgeBatcher.setHedgeInventoryCap(new BigDecimal("999"));
     }
 
     private void setField(Object target, String fieldName, Object value) {
@@ -552,6 +555,15 @@ class HedgeBatcherTest {
             SentMessage(String topic, String key, String value) {
                 this.topic = topic; this.key = key; this.value = value;
             }
+        }
+    }
+
+    static class MockHedgePositionProvider implements HedgePositionProvider {
+        private final java.util.Map<String, BigDecimal> positions = new java.util.HashMap<>();
+
+        @Override
+        public BigDecimal getHedgePosition(String symbol) {
+            return positions.getOrDefault(symbol, BigDecimal.ZERO);
         }
     }
 }
