@@ -43,9 +43,11 @@ import com.bank.trading.oms.mapper.TradeMapper;
 import com.bank.trading.oms.service.OrderService;
 import com.bank.trading.oms.service.PriceProvider;
 import com.bank.trading.oms.service.RiskChecker;
+import com.bank.trading.position.entity.BankPosition;
 import com.bank.trading.position.entity.HedgePosition;
 import com.bank.trading.position.entity.NetExposure;
 import com.bank.trading.position.entity.Position;
+import com.bank.trading.position.mapper.BankPositionMapper;
 import com.bank.trading.position.mapper.HedgePositionMapper;
 import com.bank.trading.position.mapper.PositionMapper;
 import com.bank.trading.position.service.PositionService;
@@ -121,6 +123,7 @@ class FullChainIntegrationTest {
     private PositionService positionService;
     private InMemoryPositionMapper positionMapper;
     private InMemoryHedgePositionMapper hedgePositionMapper;
+    private InMemoryBankPositionMapper bankPositionMapper;
 
     // ==== Account ====
     private AccountService accountService;
@@ -201,9 +204,11 @@ class FullChainIntegrationTest {
         // 4. 初始化 Position Service
         positionMapper = new InMemoryPositionMapper();
         hedgePositionMapper = new InMemoryHedgePositionMapper();
+        bankPositionMapper = new InMemoryBankPositionMapper();
         InMemoryProcessedEventMapper positionProcessed = new InMemoryProcessedEventMapper();
         IdempotentConsumer positionIdempotent = new IdempotentConsumer(positionProcessed);
-        positionService = new PositionService(positionMapper, hedgePositionMapper, positionIdempotent, idGenerator);
+        positionService = new PositionService(positionMapper, hedgePositionMapper, bankPositionMapper,
+                positionIdempotent, idGenerator);
 
         // 5. 初始化 Account Service
         accountCustomerMapper = new InMemoryAccountCustomerMapper();
@@ -874,6 +879,31 @@ class FullChainIntegrationTest {
             return new ArrayList<>(positions);
         }
         @Override public int update(HedgePosition p) {
+            for (int i = 0; i < positions.size(); i++) {
+                if (p.getId() != null && p.getId().equals(positions.get(i).getId())) {
+                    positions.set(i, p);
+                    return 1;
+                }
+            }
+            return 0;
+        }
+    }
+
+    static class InMemoryBankPositionMapper implements BankPositionMapper {
+        final List<BankPosition> positions = new ArrayList<>();
+        long idSeq = 0;
+
+        @Override public int insert(BankPosition p) {
+            p.setId(++idSeq); positions.add(p); return 1;
+        }
+        @Override public BankPosition findBySymbol(String s) {
+            return positions.stream().filter(p -> s.equals(p.getSymbol()))
+                    .findFirst().orElse(null);
+        }
+        @Override public List<BankPosition> findAll() {
+            return new ArrayList<>(positions);
+        }
+        @Override public int update(BankPosition p) {
             for (int i = 0; i < positions.size(); i++) {
                 if (p.getId() != null && p.getId().equals(positions.get(i).getId())) {
                     positions.set(i, p);

@@ -5,9 +5,11 @@ import com.bank.trading.common.core.event.HedgeFillEvent;
 import com.bank.trading.common.core.event.TradeEvent;
 import com.bank.trading.common.core.idgen.IdGenerator;
 import com.bank.trading.common.persistence.idempotent.IdempotentConsumer;
+import com.bank.trading.position.entity.BankPosition;
 import com.bank.trading.position.entity.HedgePosition;
 import com.bank.trading.position.entity.NetExposure;
 import com.bank.trading.position.entity.Position;
+import com.bank.trading.position.mapper.BankPositionMapper;
 import com.bank.trading.position.mapper.HedgePositionMapper;
 import com.bank.trading.position.mapper.PositionMapper;
 import org.slf4j.Logger;
@@ -25,10 +27,12 @@ import java.util.Map;
 /**
  * 持仓管理服务，是 position-service 的核心业务类。
  * <p>
- * 承担三大职责：
+ * 承担四大职责：
  * <ol>
  *   <li><b>客户持仓更新</b>：消费 {@link TradeEvent}，按 (customerId, symbol) 维度
  *       累加客户头寸，计算加权平均成本与已实现盈亏。</li>
+ *   <li><b>银行自身持仓更新</b>：与客户持仓同步更新，方向取反（客户买入 → 银行卖出），
+ *       按 symbol 维度聚合。银行头寸 = −Σ(客户头寸)，与客户成交同步产生，无需等待对冲回报。</li>
  *   <li><b>对冲持仓更新</b>：消费 {@link HedgeFillEvent}，按 symbol 维度累加做市商
  *       对冲头寸。</li>
  *   <li><b>净敞口计算</b>：实时聚合客户总头寸与对冲头寸，输出每个合约的净敞口
@@ -45,9 +49,11 @@ import java.util.Map;
  *   <li>客户 SELL → position.qty −= qty（减少多头 / 增加空头）</li>
  *   <li>对冲 BUY → hedgePosition.qty += qty（增加对冲多头）</li>
  *   <li>对冲 SELL → hedgePosition.qty −= qty（增加对冲空头）</li>
+ *   <li>银行自身：客户 BUY → bankPosition.qty −= qty（银行卖出），客户 SELL → bankPosition.qty += qty（银行买入）</li>
  * </ul>
  * 注意：对冲方向 = 客户方向（客户 BUY → 做市商建立空头 → 对冲 BUY 平掉空头），
  * 因此 customerPosition.qty 与 hedgePosition.qty 同向变化，相减即得净敞口。
+ * 银行自身头寸与客户头寸方向相反（对手方），与对冲头寸方向相同。
  */
 @Service
 public class PositionService {
@@ -59,15 +65,18 @@ public class PositionService {
 
     private final PositionMapper positionMapper;
     private final HedgePositionMapper hedgePositionMapper;
+    private final BankPositionMapper bankPositionMapper;
     private final IdempotentConsumer idempotentConsumer;
     private final IdGenerator idGenerator;
 
     public PositionService(PositionMapper positionMapper,
                            HedgePositionMapper hedgePositionMapper,
+                           BankPositionMapper bankPositionMapper,
                            IdempotentConsumer idempotentConsumer,
                            IdGenerator idGenerator) {
         this.positionMapper = positionMapper;
         this.hedgePositionMapper = hedgePositionMapper;
+        this.bankPositionMapper = bankPositionMapper;
         this.idempotentConsumer = idempotentConsumer;
         this.idGenerator = idGenerator;
     }
@@ -101,8 +110,12 @@ public class PositionService {
 
     /**
      * 应用成交事件到持仓（无幂等校验，由调用方保证）。
+     * <p>
+     * 同时更新客户持仓和银行自身持仓——银行是每一笔客户交易的对手方，
+     * 银行头寸 = −Σ(客户头寸)，与客户成交同步产生，无需等待对冲回报。
      */
     private void applyTradeEvent(TradeEvent event) {
+        // 1. 更新客户持仓
         Position position = positionMapper.findByCustomerAndSymbol(
                 event.getCustomerId(), event.getSymbol());
         boolean isNew = (position == null);
@@ -134,6 +147,10 @@ public class PositionService {
         log.info("Customer position updated: customerId={}, symbol={}, newQty={}, avgCost={}, realizedPnl={}",
                 position.getCustomerId(), position.getSymbol(),
                 position.getQty(), position.getAvgCost(), position.getRealizedPnl());
+
+        // 2. 同步更新银行自身持仓（方向取反：客户买入 → 银行卖出）
+        BigDecimal bankSignedQty = signedQty.negate();
+        updateBankPosition(event.getSymbol(), bankSignedQty, event.getPrice());
     }
 
     // ==================== 对冲持仓更新 ====================
@@ -300,6 +317,103 @@ public class PositionService {
 
         hedgePosition.setQty(newQty.setScale(QTY_SCALE, RoundingMode.HALF_UP));
         hedgePosition.setUpdatedAt(System.currentTimeMillis());
+    }
+
+    // ==================== 银行自身持仓更新 ====================
+
+    /**
+     * 更新银行自身持仓（按 symbol 聚合，不区分客户）。
+     * <p>
+     * 银行自身头寸与客户成交同步产生，方向取反：
+     * 客户 BUY  → 银行卖出 → bankSignedQty < 0
+     * 客户 SELL → 银行买入 → bankSignedQty > 0
+     * <p>
+     * 银行自身持仓与客户持仓使用相同的会计逻辑（加权平均成本 + 已实现盈亏），
+     * 因为银行作为独立实体需要计量自身头寸的盈亏。
+     *
+     * @param symbol    合约代码
+     * @param signedQty 带符号的银行头寸变化（正=银行买入，负=银行卖出）
+     * @param price     成交价格
+     */
+    private void updateBankPosition(String symbol, BigDecimal signedQty, BigDecimal price) {
+        BankPosition bankPosition = bankPositionMapper.findBySymbol(symbol);
+        boolean isNew = (bankPosition == null);
+
+        if (isNew) {
+            bankPosition = new BankPosition();
+            bankPosition.setId(idGenerator.nextLongId());
+            bankPosition.setSymbol(symbol);
+            bankPosition.setQty(BigDecimal.ZERO);
+            bankPosition.setAvgCost(BigDecimal.ZERO);
+            bankPosition.setRealizedPnl(BigDecimal.ZERO);
+            bankPosition.setVersion(0);
+            long now = System.currentTimeMillis();
+            bankPosition.setCreatedAt(now);
+            bankPosition.setUpdatedAt(now);
+        }
+
+        applyBankPositionUpdate(bankPosition, signedQty, price);
+
+        if (isNew) {
+            bankPositionMapper.insert(bankPosition);
+        } else {
+            bankPositionMapper.update(bankPosition);
+        }
+        log.info("Bank position updated: symbol={}, newQty={}, avgCost={}, realizedPnl={}",
+                bankPosition.getSymbol(), bankPosition.getQty(),
+                bankPosition.getAvgCost(), bankPosition.getRealizedPnl());
+    }
+
+    /**
+     * 应用一笔带符号的数量变化到银行自身持仓，更新 qty、avg_cost、realized_pnl。
+     * <p>
+     * 会计规则与客户持仓完全一致（同向加仓加权平均，反向平仓结算盈亏，反手重新开仓），
+     * 因为银行作为独立实体需要精确计量自身头寸的盈亏。
+     *
+     * @param bankPosition 银行自身持仓实体（会被修改）
+     * @param signedQty    带符号的数量变化（正=银行买入，负=银行卖出）
+     * @param price        成交价格
+     */
+    private void applyBankPositionUpdate(BankPosition bankPosition,
+                                         BigDecimal signedQty, BigDecimal price) {
+        BigDecimal oldQty = bankPosition.getQty();
+        BigDecimal newQty = oldQty.add(signedQty);
+        BigDecimal oldAvgCost = bankPosition.getAvgCost();
+        BigDecimal realizedPnl = bankPosition.getRealizedPnl();
+
+        boolean sameDirection = (oldQty.signum() == 0)
+                || (oldQty.signum() > 0 && signedQty.signum() > 0)
+                || (oldQty.signum() < 0 && signedQty.signum() < 0);
+
+        if (sameDirection) {
+            if (oldQty.signum() == 0) {
+                bankPosition.setAvgCost(price);
+            } else {
+                BigDecimal oldNotional = oldQty.abs().multiply(oldAvgCost);
+                BigDecimal addNotional = signedQty.abs().multiply(price);
+                BigDecimal totalNotional = oldNotional.add(addNotional);
+                BigDecimal totalQty = oldQty.abs().add(signedQty.abs());
+                bankPosition.setAvgCost(totalNotional.divide(totalQty, COST_SCALE, RoundingMode.HALF_UP));
+            }
+            bankPosition.setRealizedPnl(realizedPnl);
+        } else {
+            BigDecimal closingQty = signedQty.abs().min(oldQty.abs());
+            BigDecimal pnlPerUnit = oldQty.signum() > 0
+                    ? price.subtract(oldAvgCost)
+                    : oldAvgCost.subtract(price);
+            BigDecimal closedPnl = pnlPerUnit.multiply(closingQty);
+            bankPosition.setRealizedPnl(realizedPnl.add(closedPnl));
+
+            BigDecimal remaining = signedQty.abs().subtract(oldQty.abs());
+            if (remaining.signum() > 0) {
+                bankPosition.setAvgCost(price);
+            } else {
+                bankPosition.setAvgCost(oldAvgCost);
+            }
+        }
+
+        bankPosition.setQty(newQty.setScale(QTY_SCALE, RoundingMode.HALF_UP));
+        bankPosition.setUpdatedAt(System.currentTimeMillis());
     }
 
     // ==================== 查询与敞口计算 ====================

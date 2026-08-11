@@ -255,10 +255,12 @@ trade-event → HedgeBatcher.enqueue
 ```
 
 ### 3.6 position-service（持仓管理服务）
-- 消费 `trade-event` 更新客户头寸
-- 消费 `hedge-fill-event` 更新对冲头寸
+- 消费 `trade-event` 更新客户头寸（按 customerId + symbol）
+- **同步更新银行自身头寸**（按 symbol 聚合，方向与客户相反：客户买入 → 银行卖出）
+- 消费 `hedge-fill-event` 更新对冲头寸（按 symbol 聚合，有成交延迟）
 - 计算净敞口 = 客户头寸 - 对冲头寸
 - REST: `GET /positions/{customerId}`、`GET /positions/exposure`
+- **银行自身头寸与客户成交同步产生，无延迟；对冲头寸由交易所成交回报驱动，有延迟。两者之差 = 未对冲敞口**
 
 ### 3.7 对冲失败应对方案（Hedge Failure Handling）
 
@@ -1310,6 +1312,21 @@ CREATE TABLE hedge_position (
 );
 ```
 
+**bank_position 表（银行自身持仓）**
+```sql
+CREATE TABLE bank_position (
+  id           BIGINT PRIMARY KEY,  -- 分布式 ID（应用层 Snowflake 发号器生成）
+  symbol       VARCHAR(32) NOT NULL UNIQUE,
+  qty          DECIMAL(18,4) NOT NULL,  -- 正=银行多头（客户净卖出），负=银行空头（客户净买入）
+  avg_cost     DECIMAL(18,8),
+  realized_pnl DECIMAL(20,8),           -- 已实现盈亏（银行自身头寸的盈亏计量）
+  version      INT NOT NULL DEFAULT 0,
+  created_at   TIMESTAMP,
+  updated_at   TIMESTAMP
+);
+```
+> **说明**：银行自身头寸与客户成交同步产生（由 trade-event 驱动），方向与客户相反（客户买入 → 银行卖出）。与 hedge_position（由 hedge-fill-event 驱动，有成交延迟）不同，bank_position 反映银行实时瞬时头寸。两者之差 = 未对冲敞口。
+
 ---
 
 ## 十二、实施优先级
@@ -1488,3 +1505,22 @@ CREATE TABLE hedge_position (
 - 减少 50%+ 的交易所对冲订单（当买卖双向成交均衡时）
 - 节省手续费，降低市场冲击
 - position-service 消费模型不变（sum(BUY events) - sum(SELL events) = netQty = 交易所成交量）
+
+### 2026-08-11 — 银行自身头寸计量（BankPosition）
+
+**变更原因：**
+- 对冲头寸（`hedge_position`）由 `hedge-fill-event` 驱动更新，存在交易所成交延迟
+- 银行作为做市商，每一笔客户交易都是对手方，银行自身头寸在客户成交那一刻就已确定
+- 需要与客户成交同步的实时银行头寸，用于精确的银行自身头寸监控和盈亏计量
+
+**变更内容：**
+- 新增 `bank_position` 表：按 symbol 聚合银行自身头寸，方向与客户相反（客户 BUY → 银行 qty 减少）
+- 新增 `BankPosition` 实体类：包含 qty、avgCost、realizedPnl 等字段，与客户持仓使用相同的会计逻辑
+- 新增 `BankPositionMapper`：提供 insert/update/findBySymbol/findAll 操作
+- 修改 `PositionService`：在 `applyTradeEvent` 中同步更新银行自身持仓（与客户持仓同一事务，方向取反）
+- 银行头寸 = −Σ(客户头寸)，与客户成交同步产生，无需等待对冲回报
+
+**影响：**
+- 银行自身头寸实时、无延迟，可精确监控银行瞬时敞口
+- 与 `hedge_position`（延迟）对比可计算未对冲敞口
+- 支持银行自身头寸的盈亏计量（realizedPnl），满足银行视角的财务核算需求

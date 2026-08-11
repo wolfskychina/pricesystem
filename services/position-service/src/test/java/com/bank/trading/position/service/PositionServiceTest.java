@@ -5,11 +5,13 @@ import com.bank.trading.common.core.event.TradeEvent;
 import com.bank.trading.common.core.idgen.IdGenerator;
 import com.bank.trading.common.persistence.idempotent.IdempotentConsumer;
 import com.bank.trading.common.persistence.idempotent.ProcessedEventMapper;
+import com.bank.trading.position.entity.BankPosition;
+import com.bank.trading.position.entity.HedgePosition;
 import com.bank.trading.position.entity.NetExposure;
 import com.bank.trading.position.entity.Position;
+import com.bank.trading.position.mapper.BankPositionMapper;
 import com.bank.trading.position.mapper.HedgePositionMapper;
 import com.bank.trading.position.mapper.PositionMapper;
-import com.bank.trading.position.entity.HedgePosition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -35,16 +37,18 @@ class PositionServiceTest {
     private PositionService positionService;
     private InMemoryPositionMapper positionMapper;
     private InMemoryHedgePositionMapper hedgePositionMapper;
+    private InMemoryBankPositionMapper bankPositionMapper;
     private InMemoryProcessedEventMapper processedEventMapper;
 
     @BeforeEach
     void setUp() {
         positionMapper = new InMemoryPositionMapper();
         hedgePositionMapper = new InMemoryHedgePositionMapper();
+        bankPositionMapper = new InMemoryBankPositionMapper();
         processedEventMapper = new InMemoryProcessedEventMapper();
         IdempotentConsumer idempotentConsumer = new IdempotentConsumer(processedEventMapper);
-        positionService = new PositionService(positionMapper, hedgePositionMapper, idempotentConsumer,
-                new StubIdGenerator());
+        positionService = new PositionService(positionMapper, hedgePositionMapper, bankPositionMapper,
+                idempotentConsumer, new StubIdGenerator());
     }
 
     // ==================== 客户持仓累加测试 ====================
@@ -479,6 +483,34 @@ class PositionServiceTest {
             return new ArrayList<>(positions);
         }
         @Override public int update(HedgePosition position) {
+            for (int i = 0; i < positions.size(); i++) {
+                if (position.getId() != null && position.getId().equals(positions.get(i).getId())) {
+                    positions.set(i, position);
+                    return 1;
+                }
+            }
+            return 0;
+        }
+    }
+
+    static class InMemoryBankPositionMapper implements BankPositionMapper {
+        final List<BankPosition> positions = new ArrayList<>();
+        long idSeq = 0;
+
+        @Override public int insert(BankPosition position) {
+            position.setId(++idSeq);
+            positions.add(position);
+            return 1;
+        }
+        @Override public BankPosition findBySymbol(String symbol) {
+            return positions.stream()
+                    .filter(p -> symbol.equals(p.getSymbol()))
+                    .findFirst().orElse(null);
+        }
+        @Override public List<BankPosition> findAll() {
+            return new ArrayList<>(positions);
+        }
+        @Override public int update(BankPosition position) {
             for (int i = 0; i < positions.size(); i++) {
                 if (position.getId() != null && position.getId().equals(positions.get(i).getId())) {
                     positions.set(i, position);

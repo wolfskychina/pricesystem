@@ -262,10 +262,12 @@ trade-event → HedgeBatcher.enqueue
 
 ### 3.6 position-service (Position Management Service)
 
-- Consumes `trade-event` to update client positions
-- Consumes `hedge-fill-event` to update hedge positions
+- Consumes `trade-event` to update client positions (by customerId + symbol)
+- **Synchronously updates bank's own position** (aggregated by symbol, direction opposite to client: client BUY → bank SELL)
+- Consumes `hedge-fill-event` to update hedge positions (aggregated by symbol, with fill latency)
 - Computes net exposure = client position − hedge position
 - REST: `GET /positions/{customerId}`, `GET /positions/exposure`
+- **Bank's own position is produced synchronously with client fills, no latency; hedge positions are driven by exchange fill confirmations, with latency. The difference between the two = unhedged exposure.**
 
 ### 3.7 Hedge Failure Handling
 
@@ -1330,6 +1332,21 @@ CREATE TABLE hedge_position (
 );
 ```
 
+**bank_position table (Bank's own position)**
+```sql
+CREATE TABLE bank_position (
+  id           BIGINT PRIMARY KEY,  -- Distributed ID (application-layer Snowflake generator)
+  symbol       VARCHAR(32) NOT NULL UNIQUE,
+  qty          DECIMAL(18,4) NOT NULL,  -- Positive=bank long (client net sell), negative=bank short (client net buy)
+  avg_cost     DECIMAL(18,8),
+  realized_pnl DECIMAL(20,8),           -- Realized P&L (bank's own position P&L measurement)
+  version      INT NOT NULL DEFAULT 0,
+  created_at   TIMESTAMP,
+  updated_at   TIMESTAMP
+);
+```
+> **Note**: Bank's own position is produced synchronously with client fills (driven by trade-event), with direction opposite to client (client BUY → bank SELL). Unlike hedge_position (driven by hedge-fill-event, with fill latency), bank_position reflects the bank's real-time instantaneous position. The difference between the two = unhedged exposure.
+
 ---
 
 ## 12. Implementation Priorities
@@ -1508,3 +1525,22 @@ CREATE TABLE hedge_position (
 - 50%+ reduction in exchange hedge orders (when buy/sell volumes are balanced)
 - Savings on transaction fees and reduced market impact
 - position-service consumption model unchanged (sum(BUY events) - sum(SELL events) = netQty = exchange fill quantity)
+
+### 2026-08-11 — Bank's Own Position Measurement (BankPosition)
+
+**Reason for Change:**
+- Hedge positions (`hedge_position`) are driven by `hedge-fill-event`, which has exchange fill latency
+- As a market maker, the bank is the counterparty to every client trade; the bank's own position is determined at the moment of client fill
+- A real-time bank position synchronized with client fills is needed for accurate bank position monitoring and P&L measurement
+
+**Changes:**
+- Added `bank_position` table: aggregates bank's own position by symbol, direction opposite to client (client BUY → bank qty decreases)
+- Added `BankPosition` entity: includes qty, avgCost, realizedPnl fields, using the same accounting logic as client positions
+- Added `BankPositionMapper`: provides insert/update/findBySymbol/findAll operations
+- Modified `PositionService`: synchronously updates bank's own position in `applyTradeEvent` (same transaction as client position, direction reversed)
+- Bank position = −Σ(client position), produced synchronously with client fills, no need to wait for hedge fill confirmations
+
+**Impact:**
+- Bank's own position is real-time with zero latency, enabling precise monitoring of instantaneous bank exposure
+- Comparison with `hedge_position` (delayed) gives unhedged exposure
+- Supports P&L measurement for bank's own position (realizedPnl), satisfying bank-perspective financial accounting requirements
